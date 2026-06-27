@@ -9,11 +9,15 @@ on:
   workflow_dispatch:
     inputs:
       days_ahead:
-        description: 'Number of days ahead to scan'
+        description: 'Days ahead to scan'
         required: false
         default: '7'
       shadow_mode:
-        description: 'Shadow mode (true = log only, false = send Telegram)'
+        description: 'Shadow mode (true=log, false=Telegram)'
+        required: false
+        default: 'true'
+      ingest_enabled:
+        description: 'Run fixture ingestion (true/false)'
         required: false
         default: 'true'
 
@@ -44,9 +48,12 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SHADOW_MODE: ${{ github.event.inputs.shadow_mode || 'true' }}
+          INGEST_ENABLED: ${{ github.event.inputs.ingest_enabled || 'true' }}
+          STREAK_WINDOW: '5'
           DAYS_AHEAD: ${{ github.event.inputs.days_ahead || '7' }}
         run: |
-          echo "Starting streak scan..."
+          echo "Starting daily streak pipeline..."
+          echo "Ingestion: $INGEST_ENABLED"
           echo "Shadow mode: $SHADOW_MODE"
           echo "Days ahead: $DAYS_AHEAD"
           python -m src.pipeline

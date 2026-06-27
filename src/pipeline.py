@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime
 from typing import List
 
-from src.config import SHADOW_MODE, SCAN_MARKETS
+from src.config import SHADOW_MODE, SCAN_MARKETS, API_FOOTBALL_KEY
 from src.db import get_connection, get_cursor
 from src.streak_scanner import scan_all_upcoming, FixtureScanResult
 from src.correlation_checker import apply_alignment
@@ -163,6 +163,22 @@ def run_pipeline(days_ahead: int = None) -> None:
     logger.info(f"Shadow Mode: {'ON' if SHADOW_MODE else 'OFF'}")
     logger.info(f"Markets: {SCAN_MARKETS}")
     logger.info(f"Scan window: {days_ahead} days ahead")
+
+    # Phase 0: INGEST new fixtures from API-Football
+    import os
+    ingest_enabled = os.getenv("INGEST_ENABLED", "true").lower() == "true"
+    if ingest_enabled and API_FOOTBALL_KEY:
+        logger.info("Phase 0: Ingesting fixtures from API-Football...")
+        from src.fixture_ingester import run_ingestion
+        ingest_summary = run_ingestion(days_back=1, days_forward=days_ahead)
+        logger.info(
+            f"Ingestion complete: {ingest_summary['fixtures_inserted']} new, "
+            f"{ingest_summary['fixtures_updated']} updated, "
+            f"{ingest_summary['new_leagues_created']} new leagues, "
+            f"{ingest_summary['new_teams_created']} new teams"
+        )
+    else:
+        logger.info("Phase 0: Fixture ingestion skipped (INGEST_ENABLED=false or no API key)")
 
     # Phase 1: EXTRACT + TRANSFORM (streak scan)
     logger.info("Phase 1: Scanning upcoming fixtures for streaks...")
