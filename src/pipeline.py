@@ -140,15 +140,22 @@ def load_results_to_supabase(
     return rows_written, errors
 
 
-def run_pipeline(days_ahead: int = 7) -> None:
+def run_pipeline(days_ahead: int = None) -> None:
     """
     Main pipeline entry point.
 
-    1. Scan upcoming fixtures for streaks
-    2. Apply correlation / alignment checks
-    3. Load results to Supabase
-    4. Log shadow-mode summary
+    days_ahead defaults to the DAYS_AHEAD env var (default 7) so GitHub
+    Actions can override it without code changes.
+
+    1. EXTRACT + TRANSFORM: streak scan of upcoming fixtures
+    2. TRANSFORM: correlation / alignment checks
+    3. LOAD: write to flagged_opportunities (ON CONFLICT upsert)
+    4. NOTIFY: Telegram summary + HIGH_SIGNAL alerts (shadow mode safe)
     """
+    import os
+    if days_ahead is None:
+        days_ahead = int(os.getenv('DAYS_AHEAD', '7'))
+
     pipeline_run_id = (
         f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
     )
@@ -173,7 +180,7 @@ def run_pipeline(days_ahead: int = 7) -> None:
     logger.info("Phase 3: Loading results to Supabase...")
     rows_written, errors = load_results_to_supabase(scan_results, pipeline_run_id)
 
-    # Phase 4: Summary
+    # Phase 4: NOTIFY
     high_signals = [
         (fr, mkey, md)
         for fr in scan_results
@@ -186,6 +193,11 @@ def run_pipeline(days_ahead: int = 7) -> None:
         for mkey, md in fr.market_results.items()
         if md['signal_tier'] == 'MODERATE_SIGNAL'
     ]
+    tracking_count = sum(
+        1 for fr in scan_results
+        for md in fr.market_results.values()
+        if md['signal_tier'] == 'TRACKING'
+    )
 
     logger.info("=== Run Complete ===")
     logger.info(f"Fixtures scanned:  {len(scan_results)}")
@@ -193,25 +205,18 @@ def run_pipeline(days_ahead: int = 7) -> None:
     logger.info(f"MODERATE_SIGNAL:   {len(moderate_signals)}")
     logger.info(f"Rows written:      {rows_written}")
 
-    if SHADOW_MODE:
-        logger.info("SHADOW MODE: No Telegram messages sent.")
-        if high_signals:
-            logger.info("--- Would Have Broadcast ---")
-            for fr, mkey, md in high_signals:
-                hv = md['home_venue']
-                ho = md['home_overall']
-                av = md['away_venue']
-                ao = md['away_overall']
-                logger.info(
-                    f"  {fr.home_team_name} vs {fr.away_team_name} | "
-                    f"H: {hv.streak_length}v/{ho.streak_length}o  "
-                    f"A: {av.streak_length}v/{ao.streak_length}o | "
-                    f"{CORE_MARKETS[mkey].name} | "
-                    f"{'ALIGNED' if md['alignment_met'] else 'UNALIGNED'}"
-                )
-    else:
-        # Session 3: Call telegram_notifier.send_alerts(high_signals)
-        logger.info("LIVE MODE: Telegram notifications not yet implemented (Session 3).")
+    from src.telegram_notifier import send_alerts
+    send_alerts(
+        high_signals=high_signals,
+        total_fixtures=len(scan_results),
+        high_count=len(high_signals),
+        moderate_count=len(moderate_signals),
+        tracking_count=tracking_count,
+        rows_written=rows_written,
+        pipeline_run_id=pipeline_run_id,
+    )
+
+    logger.info(f"=== Pipeline Run Complete: {pipeline_run_id} ===")
 
 
 if __name__ == '__main__':

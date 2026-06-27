@@ -1,0 +1,75 @@
+name: Daily Streak Scan
+
+on:
+  # Run daily at 06:00 UTC
+  schedule:
+    - cron: '0 6 * * *'
+
+  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
+    inputs:
+      days_ahead:
+        description: 'Number of days ahead to scan'
+        required: false
+        default: '7'
+      shadow_mode:
+        description: 'Shadow mode (true = log only, false = send Telegram)'
+        required: false
+        default: 'true'
+
+jobs:
+  streak-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run streak pipeline
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SHADOW_MODE: ${{ github.event.inputs.shadow_mode || 'true' }}
+          DAYS_AHEAD: ${{ github.event.inputs.days_ahead || '7' }}
+        run: |
+          echo "Starting streak scan..."
+          echo "Shadow mode: $SHADOW_MODE"
+          echo "Days ahead: $DAYS_AHEAD"
+          python -m src.pipeline
+          echo "Pipeline complete."
+
+      - name: Check results
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python -c "
+          from src.db import get_cursor
+          with get_cursor() as cur:
+              cur.execute('''
+                  SELECT signal_tier, count(*)
+                  FROM flagged_opportunities
+                  WHERE scan_date = CURRENT_DATE
+                  GROUP BY signal_tier
+                  ORDER BY signal_tier
+              ''')
+              print(\"=== Today's Results ===\")
+              for row in cur.fetchall():
+                  print(f'  {row[0]}: {row[1]}')
+              cur.execute('SELECT count(*) FROM flagged_opportunities WHERE scan_date = CURRENT_DATE')
+              total = cur.fetchone()[0]
+              print(f'  Total rows: {total}')
+          "
