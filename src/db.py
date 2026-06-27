@@ -53,6 +53,21 @@ def get_connection() -> Generator[psycopg2.extensions.connection, None, None]:
         conn.close()
 
 
+@contextmanager
+def get_cursor() -> Generator[psycopg2.extensions.cursor, None, None]:
+    """Context manager that yields a psycopg2 cursor.
+
+    Opens a connection, yields a cursor, commits on clean exit,
+    rolls back on exception, always closes both.
+    """
+    with get_connection() as conn:
+        cur = conn.cursor()
+        try:
+            yield cur
+        finally:
+            cur.close()
+
+
 def test_connection() -> None:
     """Verify the Supabase connection and print a summary row count.
 

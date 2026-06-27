@@ -38,15 +38,22 @@ MIN_FIXTURES_FULL: int = 10
 MIN_FIXTURES_SEMI: int = 7
 MIN_FIXTURES_MINI: int = 5
 
-# Core 6 markets evaluated by the pipeline
-CORE_MARKETS: list[str] = [
-    "1x2",
-    "btts",
-    "goals_ou",
-    "ht_1x2",
-    "ht_btts",
-    "cards_ou",
+# Streak window: number of historical matches evaluated per team × lens
+STREAK_WINDOW: int = 5
+
+# Signal tier thresholds (streak count out of STREAK_WINDOW)
+HIGH_SIGNAL_MIN: int = 5
+MODERATE_SIGNAL_MIN: int = 4
+
+# All 11 markets scanned by the pipeline
+SCAN_MARKETS: list[str] = [
+    "ft_win", "ht_win",
+    "dc_1x_ft", "dc_x2_ft", "dc_1x_ht", "dc_x2_ht",
+    "gg_ft", "over_2_5", "under_2_5", "under_3_5", "hsh_2h",
 ]
+
+# Legacy alias kept for backwards compatibility
+CORE_MARKETS: list[str] = SCAN_MARKETS
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")

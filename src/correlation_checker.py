@@ -1,0 +1,136 @@
+"""
+Phase 2: The Alignment — Correlation Checker.
+
+After the streak scanner labels each team's streak per market, this module checks
+whether the HOME team's streak and AWAY team's streak ALIGN according to the market's
+match_type rule.
+
+Alignment Rules:
+- COMPLEMENTARY: Home shows pattern X AND away shows pattern Y (complement already
+  encoded in evaluate_away). Both must hit HIGH_SIGNAL_MIN.
+- SAME_PATTERN: Both teams show the SAME pattern individually at HIGH_SIGNAL_MIN.
+- COMBINED: Both teams individually exhibit the pattern at HIGH_SIGNAL_MIN.
+- FLEXIBLE_OR: EITHER team shows the pattern at HIGH_SIGNAL_MIN.
+
+Signal Tier Logic (uses the STRONGER of venue-specific vs overall per team):
+- HIGH_SIGNAL:    alignment confirmed AND (home_best >= 5 OR away_best >= 5)
+- MODERATE_SIGNAL: home_best >= 4 OR away_best >= 4
+- TRACKING:       below thresholds on both lenses for both teams
+"""
+import logging
+from typing import List
+
+from src.streak_scanner import FixtureScanResult, StreakResult
+from src.market_presets import MatchType, CORE_MARKETS
+from src.config import HIGH_SIGNAL_MIN, MODERATE_SIGNAL_MIN
+
+logger = logging.getLogger(__name__)
+
+
+def best_streak(venue: StreakResult, overall: StreakResult) -> int:
+    """Return the stronger streak length between venue-specific and overall."""
+    return max(venue.streak_length, overall.streak_length)
+
+
+def best_trend(venue: StreakResult, overall: StreakResult) -> int:
+    """Return the stronger trend count between venue-specific and overall."""
+    return max(venue.trend_count, overall.trend_count)
+
+
+def check_alignment(
+    home_venue: StreakResult,
+    home_overall: StreakResult,
+    away_venue: StreakResult,
+    away_overall: StreakResult,
+    match_type: str,
+) -> bool:
+    """
+    Check if the alignment condition is met for a given market.
+
+    Uses the BEST (highest) streak from either lens per team.
+    Alignment requires both sides to meet HIGH_SIGNAL_MIN for most types.
+    """
+    home_best = best_streak(home_venue, home_overall)
+    away_best = best_streak(away_venue, away_overall)
+
+    if match_type in (MatchType.COMPLEMENTARY, MatchType.SAME_PATTERN, MatchType.COMBINED):
+        return home_best >= HIGH_SIGNAL_MIN and away_best >= HIGH_SIGNAL_MIN
+
+    elif match_type == MatchType.FLEXIBLE_OR:
+        return home_best >= HIGH_SIGNAL_MIN or away_best >= HIGH_SIGNAL_MIN
+
+    else:
+        logger.warning(f"Unknown match_type: {match_type}")
+        return False
+
+
+def classify_signal_tier(
+    home_venue: StreakResult,
+    home_overall: StreakResult,
+    away_venue: StreakResult,
+    away_overall: StreakResult,
+    alignment_met: bool,
+) -> str:
+    """
+    Classify the signal tier based on streak strengths and alignment.
+
+    Returns one of: 'HIGH_SIGNAL', 'MODERATE_SIGNAL', 'TRACKING'.
+    """
+    home_best = best_streak(home_venue, home_overall)
+    away_best = best_streak(away_venue, away_overall)
+
+    if alignment_met and (home_best >= HIGH_SIGNAL_MIN or away_best >= HIGH_SIGNAL_MIN):
+        return 'HIGH_SIGNAL'
+
+    if home_best >= MODERATE_SIGNAL_MIN or away_best >= MODERATE_SIGNAL_MIN:
+        return 'MODERATE_SIGNAL'
+
+    return 'TRACKING'
+
+
+def apply_alignment(scan_results: List[FixtureScanResult]) -> List[FixtureScanResult]:
+    """
+    Apply correlation checks to all scanned fixtures.
+
+    For each fixture × market, evaluates alignment and assigns signal tiers.
+    Modifies scan_results in-place and returns them.
+    """
+    for fixture_result in scan_results:
+        for mkey, market_data in fixture_result.market_results.items():
+            market = CORE_MARKETS[mkey]
+
+            home_venue = market_data['home_venue']
+            home_overall = market_data['home_overall']
+            away_venue = market_data['away_venue']
+            away_overall = market_data['away_overall']
+
+            alignment = check_alignment(
+                home_venue, home_overall,
+                away_venue, away_overall,
+                market.match_type,
+            )
+            tier = classify_signal_tier(
+                home_venue, home_overall,
+                away_venue, away_overall,
+                alignment,
+            )
+
+            market_data['alignment_met'] = alignment
+            market_data['signal_tier'] = tier
+
+    high_count = sum(
+        1 for fr in scan_results
+        for md in fr.market_results.values()
+        if md['signal_tier'] == 'HIGH_SIGNAL'
+    )
+    moderate_count = sum(
+        1 for fr in scan_results
+        for md in fr.market_results.values()
+        if md['signal_tier'] == 'MODERATE_SIGNAL'
+    )
+    logger.info(
+        f"Alignment complete: {high_count} HIGH_SIGNAL, {moderate_count} MODERATE_SIGNAL "
+        f"across {len(scan_results)} fixtures × {len(CORE_MARKETS)} markets"
+    )
+
+    return scan_results
