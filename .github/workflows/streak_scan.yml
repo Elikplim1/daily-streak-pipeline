@@ -65,18 +65,13 @@ jobs:
         run: |
           python -c "
           from src.db import get_cursor
+          import sys
+          sys.path.insert(0, '.')
           with get_cursor() as cur:
-              cur.execute('''
-                  SELECT signal_tier, count(*)
-                  FROM flagged_opportunities
-                  WHERE scan_date = CURRENT_DATE
-                  GROUP BY signal_tier
-                  ORDER BY signal_tier
-              ''')
-              print(\"=== Today's Results ===\")
+              cur.execute('SELECT signal_tier, count(*) FROM flagged_opportunities WHERE scan_date = CURRENT_DATE GROUP BY signal_tier ORDER BY signal_tier')
+              print('=== Results ===')
               for row in cur.fetchall():
                   print(f'  {row[0]}: {row[1]}')
               cur.execute('SELECT count(*) FROM flagged_opportunities WHERE scan_date = CURRENT_DATE')
-              total = cur.fetchone()[0]
-              print(f'  Total rows: {total}')
+              print(f'  Total: {cur.fetchone()[0]}')
           "
