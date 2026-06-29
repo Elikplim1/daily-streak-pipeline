@@ -11,15 +11,15 @@ load_dotenv()
 DATABASE_URL: str = os.environ["DATABASE_URL"]
 
 # ── API-Football ──────────────────────────────────────────────────────────────
-API_FOOTBALL_KEY: str = os.environ["API_FOOTBALL_KEY"]
+API_FOOTBALL_KEY: str = os.getenv("API_FOOTBALL_KEY", "")
 API_FOOTBALL_BASE_URL: str = os.getenv(
     "API_FOOTBALL_BASE_URL", "https://v3.football.api-sports.io"
 )
 API_FOOTBALL_RATE_LIMIT: int = int(os.getenv("API_FOOTBALL_RATE_LIMIT", "300"))
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
-TELEGRAM_BOT_TOKEN: str = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID: str = os.environ["TELEGRAM_CHAT_ID"]
+TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
 SHADOW_MODE: bool = os.getenv("SHADOW_MODE", "true").lower() == "true"
 
 # ── Signal thresholds ─────────────────────────────────────────────────────────

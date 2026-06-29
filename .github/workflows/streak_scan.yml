@@ -62,6 +62,7 @@ jobs:
       - name: Check results
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: |
           python -c "
           from src.db import get_cursor
