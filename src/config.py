@@ -48,6 +48,30 @@ STREAK_WINDOW: int = 5
 HIGH_SIGNAL_MIN: int = 5
 MODERATE_SIGNAL_MIN: int = 4
 
+# Per-market threshold overrides for markets where NON_OCCURRENCE is the
+# baseline (>70% natural rate) — the default HIGH_SIGNAL_MIN/MODERATE_SIGNAL_MIN
+# (5/4) are too easy to hit by chance for these, so they need a higher bar.
+#
+# NOTE: streak_length is capped at STREAK_WINDOW (5) — scan_fixture() only
+# evaluates the last 5 matches per team × lens, so no threshold here can
+# exceed 5. The values below are clamped to that ceiling: "high" is 5 (the
+# max achievable, same ceiling as the default) and "moderate" is likewise
+# raised to 5, since anything strictly between the default's 4 and the
+# ceiling of 5 doesn't exist as an integer. In practice this means these
+# markets only register as a signal (MODERATE or HIGH) on a perfect 5/5
+# streak — a 4/5 streak, which is enough for MODERATE on every other
+# market, stays at TRACKING for these.
+MARKET_THRESHOLD_OVERRIDES: dict[str, dict[str, int]] = {
+    "no_goal_5min": {"high": 5, "moderate": 5},
+    "no_goal_10min": {"high": 5, "moderate": 5},
+    "no_home_3plus": {"high": 5, "moderate": 5},
+    "no_away_3plus": {"high": 5, "moderate": 5},
+    "no_win_nil_home": {"high": 5, "moderate": 5},
+    "no_win_nil_away": {"high": 5, "moderate": 5},
+    "no_home_2plus": {"high": 5, "moderate": 5},
+    "no_away_2plus": {"high": 5, "moderate": 5},
+}
+
 # All 39 markets scanned by the pipeline (11 original + 28 added in Session 5A)
 SCAN_MARKETS: list[str] = [
     # === EXISTING 11 ===

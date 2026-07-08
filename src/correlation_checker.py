@@ -22,7 +22,7 @@ from typing import List
 
 from src.streak_scanner import FixtureScanResult, StreakResult
 from src.market_presets import MatchType, CORE_MARKETS
-from src.config import HIGH_SIGNAL_MIN, MODERATE_SIGNAL_MIN
+from src.config import HIGH_SIGNAL_MIN, MODERATE_SIGNAL_MIN, MARKET_THRESHOLD_OVERRIDES
 
 logger = logging.getLogger(__name__)
 
@@ -70,19 +70,29 @@ def classify_signal_tier(
     away_venue: StreakResult,
     away_overall: StreakResult,
     alignment_met: bool,
+    market_key: str = None,
 ) -> str:
     """
     Classify the signal tier based on streak strengths and alignment.
+
+    Markets listed in MARKET_THRESHOLD_OVERRIDES (config.py) use their own
+    high/moderate thresholds instead of the global HIGH_SIGNAL_MIN /
+    MODERATE_SIGNAL_MIN — these are markets where NON_OCCURRENCE is the
+    natural baseline, so the default bar is too easy to clear by chance.
 
     Returns one of: 'HIGH_SIGNAL', 'MODERATE_SIGNAL', 'TRACKING'.
     """
     home_best = best_streak(home_venue, home_overall)
     away_best = best_streak(away_venue, away_overall)
 
-    if alignment_met and (home_best >= HIGH_SIGNAL_MIN or away_best >= HIGH_SIGNAL_MIN):
+    overrides = MARKET_THRESHOLD_OVERRIDES.get(market_key)
+    high_min = overrides['high'] if overrides else HIGH_SIGNAL_MIN
+    moderate_min = overrides['moderate'] if overrides else MODERATE_SIGNAL_MIN
+
+    if alignment_met and (home_best >= high_min or away_best >= high_min):
         return 'HIGH_SIGNAL'
 
-    if home_best >= MODERATE_SIGNAL_MIN or away_best >= MODERATE_SIGNAL_MIN:
+    if home_best >= moderate_min or away_best >= moderate_min:
         return 'MODERATE_SIGNAL'
 
     return 'TRACKING'
@@ -113,6 +123,7 @@ def apply_alignment(scan_results: List[FixtureScanResult]) -> List[FixtureScanRe
                 home_venue, home_overall,
                 away_venue, away_overall,
                 alignment,
+                market_key=mkey,
             )
 
             market_data['alignment_met'] = alignment
