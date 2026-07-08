@@ -72,6 +72,21 @@ MARKET_THRESHOLD_OVERRIDES: dict[str, dict[str, int]] = {
     "no_away_2plus": {"high": 5, "moderate": 5},
 }
 
+# Markets that are SUPPORTING EVIDENCE only: still calculated, still shown
+# in the spreadsheet (labeled "SUPPORTING" there), but never generate a
+# HIGH_SIGNAL or MODERATE_SIGNAL alert on their own — always TRACKING,
+# regardless of streak length or alignment.
+SUPPORTING_EVIDENCE_ONLY: list[str] = [
+    "no_goal_5min",
+    "no_goal_10min",
+    "no_home_3plus",
+    "no_away_3plus",
+    "no_win_nil_home",
+    "no_win_nil_away",
+    "no_home_2plus",
+    "no_away_2plus",
+]
+
 # All 39 markets scanned by the pipeline (11 original + 28 added in Session 5A)
 SCAN_MARKETS: list[str] = [
     # === EXISTING 11 ===

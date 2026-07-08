@@ -52,6 +52,7 @@ def build_spreadsheet(
         return None
 
     from src.market_presets import CORE_MARKETS
+    from src.config import SUPPORTING_EVIDENCE_ONLY
 
     wb = Workbook()
     ws = wb.active
@@ -60,7 +61,7 @@ def build_spreadsheet(
     # Headers
     headers = [
         "Date", "Kickoff (UTC)", "League", "Home Team", "Away Team",
-        "Market", "Signal Tier", "Alignment",
+        "Market", "Signal Tier", "Role", "Alignment",
         "Home Venue Streak", "Home Overall", "Home Venue Trend", "Home Overall Trend",
         "Away Venue Streak", "Away Overall", "Away Venue Trend", "Away Overall Trend",
         "Match Type", "Streak Type",
@@ -75,12 +76,14 @@ def build_spreadsheet(
     # Freeze top row
     ws.freeze_panes = 'A2'
 
-    # Data rows — only HIGH and MODERATE signals
+    # Data rows — HIGH/MODERATE signals, plus SUPPORTING_EVIDENCE_ONLY markets
+    # shown as context even though they're always TRACKING on their own.
     row_idx = 2
     for fr in sorted(scan_results, key=lambda x: x.fixture_date or ''):
         for mkey, mdata in fr.market_results.items():
             tier = mdata['signal_tier']
-            if tier not in ('HIGH_SIGNAL', 'MODERATE_SIGNAL'):
+            is_supporting = mkey in SUPPORTING_EVIDENCE_ONLY
+            if tier not in ('HIGH_SIGNAL', 'MODERATE_SIGNAL') and not is_supporting:
                 continue
 
             market = CORE_MARKETS.get(mkey)
@@ -100,6 +103,7 @@ def build_spreadsheet(
                 date_only, time_only,
                 fr.league_name, fr.home_team_name, fr.away_team_name,
                 market.name, tier,
+                'SUPPORTING' if is_supporting else 'SIGNAL',
                 'YES' if mdata['alignment_met'] else 'NO',
                 hv.streak_length, ho.streak_length,
                 hv.trend_count, ho.trend_count,

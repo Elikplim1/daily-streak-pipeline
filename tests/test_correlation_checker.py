@@ -47,42 +47,48 @@ class TestDefaultThresholds:
         assert tier == 'MODERATE_SIGNAL'
 
 
-class TestMarketThresholdOverrides:
-    """Overridden markets (config.MARKET_THRESHOLD_OVERRIDES) require a
-    perfect 5/5 streak to register as MODERATE or HIGH — a 4/5 streak,
-    which is enough for MODERATE on any other market, stays TRACKING."""
+class TestSupportingEvidenceOnly:
+    """Markets in config.SUPPORTING_EVIDENCE_ONLY never fire independently —
+    always TRACKING regardless of streak values or alignment. This check
+    runs before MARKET_THRESHOLD_OVERRIDES is even consulted, so it wins
+    even though every SUPPORTING_EVIDENCE_ONLY market also happens to have
+    a (now unreachable) entry in MARKET_THRESHOLD_OVERRIDES."""
 
-    def test_four_of_five_stays_tracking_for_overridden_market(self):
-        tier = classify_signal_tier(
-            make_streak(4), make_streak(4), make_streak(2), make_streak(2),
-            alignment_met=False, market_key='no_goal_5min',
-        )
-        assert tier == 'TRACKING'
-
-    def test_perfect_streak_with_alignment_is_high_signal(self):
+    def test_perfect_streak_with_alignment_still_tracking(self):
+        """Even a 5/5 streak with alignment met — the strongest possible
+        signal — stays TRACKING for a supporting-evidence market."""
         tier = classify_signal_tier(
             make_streak(5), make_streak(5), make_streak(5), make_streak(5),
             alignment_met=True, market_key='no_goal_5min',
         )
-        assert tier == 'HIGH_SIGNAL'
+        assert tier == 'TRACKING'
 
-    def test_perfect_streak_without_alignment_is_moderate(self):
+    def test_four_of_five_stays_tracking(self):
         tier = classify_signal_tier(
-            make_streak(5), make_streak(5), make_streak(1), make_streak(1),
+            make_streak(4), make_streak(4), make_streak(2), make_streak(2),
             alignment_met=False, market_key='no_win_nil_home',
         )
-        assert tier == 'MODERATE_SIGNAL'
+        assert tier == 'TRACKING'
 
-    def test_applies_to_all_eight_overridden_markets(self):
-        overridden_markets = [
+    def test_applies_to_all_eight_supporting_markets(self):
+        supporting_markets = [
             'no_goal_5min', 'no_goal_10min',
             'no_home_3plus', 'no_away_3plus',
             'no_win_nil_home', 'no_win_nil_away',
             'no_home_2plus', 'no_away_2plus',
         ]
-        for mkey in overridden_markets:
+        for mkey in supporting_markets:
             tier = classify_signal_tier(
-                make_streak(4), make_streak(4), make_streak(2), make_streak(2),
-                alignment_met=False, market_key=mkey,
+                make_streak(5), make_streak(5), make_streak(5), make_streak(5),
+                alignment_met=True, market_key=mkey,
             )
-            assert tier == 'TRACKING', f"{mkey} should stay TRACKING on a 4/5 streak"
+            assert tier == 'TRACKING', f"{mkey} should always be TRACKING, even on 5/5 with alignment"
+
+    def test_non_supporting_market_unaffected(self):
+        """Sanity check: a market NOT in SUPPORTING_EVIDENCE_ONLY still
+        fires normally on a perfect aligned streak."""
+        tier = classify_signal_tier(
+            make_streak(5), make_streak(5), make_streak(5), make_streak(5),
+            alignment_met=True, market_key='ft_win',
+        )
+        assert tier == 'HIGH_SIGNAL'

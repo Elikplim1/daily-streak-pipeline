@@ -22,7 +22,12 @@ from typing import List
 
 from src.streak_scanner import FixtureScanResult, StreakResult
 from src.market_presets import MatchType, CORE_MARKETS
-from src.config import HIGH_SIGNAL_MIN, MODERATE_SIGNAL_MIN, MARKET_THRESHOLD_OVERRIDES
+from src.config import (
+    HIGH_SIGNAL_MIN,
+    MODERATE_SIGNAL_MIN,
+    MARKET_THRESHOLD_OVERRIDES,
+    SUPPORTING_EVIDENCE_ONLY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,10 +75,14 @@ def classify_signal_tier(
     away_venue: StreakResult,
     away_overall: StreakResult,
     alignment_met: bool,
-    market_key: str = None,
+    market_key: str = "",
 ) -> str:
     """
     Classify the signal tier based on streak strengths and alignment.
+
+    Markets in SUPPORTING_EVIDENCE_ONLY (config.py) never fire independently —
+    they're still calculated and shown in the spreadsheet as context, but
+    always classify as TRACKING regardless of streak length or alignment.
 
     Markets listed in MARKET_THRESHOLD_OVERRIDES (config.py) use their own
     high/moderate thresholds instead of the global HIGH_SIGNAL_MIN /
@@ -82,6 +91,10 @@ def classify_signal_tier(
 
     Returns one of: 'HIGH_SIGNAL', 'MODERATE_SIGNAL', 'TRACKING'.
     """
+    # Supporting evidence markets never fire independently
+    if market_key in SUPPORTING_EVIDENCE_ONLY:
+        return 'TRACKING'
+
     home_best = best_streak(home_venue, home_overall)
     away_best = best_streak(away_venue, away_overall)
 
