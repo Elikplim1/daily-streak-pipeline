@@ -11,7 +11,7 @@ load_dotenv()
 DATABASE_URL: str = os.environ["DATABASE_URL"]
 
 # ── API-Football ──────────────────────────────────────────────────────────────
-API_FOOTBALL_KEY: str = os.getenv("API_FOOTBALL_KEY", "")
+API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "")
 API_FOOTBALL_BASE_URL: str = os.getenv(
     "API_FOOTBALL_BASE_URL", "https://v3.football.api-sports.io"
 )
