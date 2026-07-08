@@ -4,8 +4,14 @@ Unit tests for the streak scanner core logic.
 Tests calculation functions with known inputs — does NOT require a Supabase connection.
 Run with: pytest tests/test_streak_scanner.py -v
 """
+from unittest.mock import MagicMock
+
 import pytest
-from src.streak_scanner import calculate_streak_and_trend
+from src.streak_scanner import (
+    calculate_streak_and_trend,
+    evaluate_no_goal_minutes,
+    evaluate_no_goal_market,
+)
 from src.market_presets import (
     eval_ft_win_home, eval_ft_win_away,
     eval_btts_home,
@@ -16,6 +22,21 @@ from src.market_presets import (
     eval_dc_x2_ft_home,
     _scores_available,
     _total_goals,
+    # Session 5A additions
+    eval_over15_home, eval_under15_home, eval_over45_home,
+    eval_btts_over25_home,
+    eval_no_win_nil_home, eval_no_win_nil_away,
+    eval_no_home_2plus_home, eval_no_away_2plus_home,
+    eval_no_home_3plus_home, eval_no_away_3plus_home,
+    eval_no_both_halves_over05_home, eval_both_halves_under15_home,
+    eval_odd_total_home, eval_hsh_1h_home, eval_ht_00_home,
+    eval_htft_hh_home, eval_htft_hh_away,
+    eval_htft_dh_home, eval_htft_dh_away,
+    eval_ms_home_nil_low_home, eval_ms_away_nil_low_home,
+    eval_ms_home_blowout_home, eval_ms_away_blowout_home,
+    eval_ms_home_comfort_home, eval_ms_away_comfort_home,
+    eval_ms_high_home_home, eval_ms_high_away_home,
+    eval_ms_draw_home,
 )
 
 
@@ -234,3 +255,287 @@ class TestMarketEvaluations:
     def test_total_goals_none(self):
         f = self.make_fixture(None, None)
         assert _total_goals(f) is None
+
+
+class TestSession5AGoalLineMarkets:
+    """Over 1.5 / Under 1.5 / Over 4.5 / BTTS+Over2.5."""
+
+    def make_fixture(self, ft_h=None, ft_a=None, ht_h=None, ht_a=None) -> dict:
+        return {'ft_home': ft_h, 'ft_away': ft_a, 'ht_home': ht_h, 'ht_away': ht_a}
+
+    def test_over15_true(self):
+        assert eval_over15_home(self.make_fixture(1, 1)) is True
+
+    def test_over15_false_exact(self):
+        assert eval_over15_home(self.make_fixture(1, 0)) is False
+
+    def test_over15_none(self):
+        assert eval_over15_home(self.make_fixture(None, None)) is None
+
+    def test_under15_true(self):
+        assert eval_under15_home(self.make_fixture(1, 0)) is True
+
+    def test_under15_false(self):
+        assert eval_under15_home(self.make_fixture(1, 1)) is False
+
+    def test_under15_none(self):
+        assert eval_under15_home(self.make_fixture(None, None)) is None
+
+    def test_over45_true(self):
+        assert eval_over45_home(self.make_fixture(3, 2)) is True
+
+    def test_over45_false_exact(self):
+        assert eval_over45_home(self.make_fixture(3, 1)) is False
+
+    def test_over45_none(self):
+        assert eval_over45_home(self.make_fixture(None, None)) is None
+
+    def test_btts_over25_true(self):
+        assert eval_btts_over25_home(self.make_fixture(2, 1)) is True
+
+    def test_btts_over25_false_no_btts(self):
+        """3 goals total but away didn't score."""
+        assert eval_btts_over25_home(self.make_fixture(3, 0)) is False
+
+    def test_btts_over25_false_under(self):
+        """Both scored but only 2 total goals."""
+        assert eval_btts_over25_home(self.make_fixture(1, 1)) is False
+
+    def test_btts_over25_none(self):
+        assert eval_btts_over25_home(self.make_fixture(None, None)) is None
+
+
+class TestSession5ANonOccurrenceMarkets:
+    """No Win to Nil / Not Scoring 2+ / Not Scoring 3+."""
+
+    def make_fixture(self, ft_h=None, ft_a=None) -> dict:
+        return {'ft_home': ft_h, 'ft_away': ft_a}
+
+    def test_no_win_nil_home_true_when_not_won_to_nil(self):
+        """Home won but conceded — no win-to-nil, so True."""
+        assert eval_no_win_nil_home(self.make_fixture(2, 1)) is True
+
+    def test_no_win_nil_home_false_when_won_to_nil(self):
+        assert eval_no_win_nil_home(self.make_fixture(2, 0)) is False
+
+    def test_no_win_nil_home_true_when_lost(self):
+        assert eval_no_win_nil_home(self.make_fixture(0, 1)) is True
+
+    def test_no_win_nil_away_false_when_away_won_to_nil(self):
+        assert eval_no_win_nil_away(self.make_fixture(0, 2)) is False
+
+    def test_no_win_nil_away_true_otherwise(self):
+        assert eval_no_win_nil_away(self.make_fixture(1, 2)) is True
+
+    def test_no_win_nil_none(self):
+        assert eval_no_win_nil_home(self.make_fixture(None, None)) is None
+
+    def test_no_home_2plus_true(self):
+        assert eval_no_home_2plus_home(self.make_fixture(1, 0)) is True
+
+    def test_no_home_2plus_false(self):
+        assert eval_no_home_2plus_home(self.make_fixture(2, 0)) is False
+
+    def test_no_home_2plus_edge_zero(self):
+        assert eval_no_home_2plus_home(self.make_fixture(0, 0)) is True
+
+    def test_no_away_2plus_true(self):
+        assert eval_no_away_2plus_home(self.make_fixture(0, 1)) is True
+
+    def test_no_away_2plus_false(self):
+        assert eval_no_away_2plus_home(self.make_fixture(0, 2)) is False
+
+    def test_no_home_3plus_true(self):
+        assert eval_no_home_3plus_home(self.make_fixture(2, 0)) is True
+
+    def test_no_home_3plus_false(self):
+        assert eval_no_home_3plus_home(self.make_fixture(3, 0)) is False
+
+    def test_no_away_3plus_true(self):
+        assert eval_no_away_3plus_home(self.make_fixture(0, 2)) is True
+
+    def test_no_away_3plus_false(self):
+        assert eval_no_away_3plus_home(self.make_fixture(0, 3)) is False
+
+    def test_no_home_2plus_none(self):
+        assert eval_no_home_2plus_home(self.make_fixture(None, None)) is None
+
+
+class TestSession5AHalfStructureMarkets:
+    """Half-goal patterns, odd totals, HSH 1st half, HT 0-0, HT/FT."""
+
+    def make_fixture(self, ft_h=None, ft_a=None, ht_h=None, ht_a=None) -> dict:
+        return {'ft_home': ft_h, 'ft_away': ft_a, 'ht_home': ht_h, 'ht_away': ht_a}
+
+    def test_no_both_halves_over05_true_goalless_half(self):
+        """1H 0-0, FT 2-0 → 2nd half scored, 1st half didn't → True."""
+        f = self.make_fixture(2, 0, 0, 0)
+        assert eval_no_both_halves_over05_home(f) is True
+
+    def test_no_both_halves_over05_false_both_scored(self):
+        """1H 1-0, FT 2-1 → both halves scored → False."""
+        f = self.make_fixture(2, 1, 1, 0)
+        assert eval_no_both_halves_over05_home(f) is False
+
+    def test_no_both_halves_over05_none(self):
+        assert eval_no_both_halves_over05_home(self.make_fixture(1, 1, None, None)) is None
+
+    def test_both_halves_under15_true(self):
+        """1H 1-0, 2H 0-1 (FT 1-1) → each half has 1 goal → True."""
+        f = self.make_fixture(1, 1, 1, 0)
+        assert eval_both_halves_under15_home(f) is True
+
+    def test_both_halves_under15_false(self):
+        """1H 0-0, FT 2-1 → 2nd half had 3 goals → False."""
+        f = self.make_fixture(2, 1, 0, 0)
+        assert eval_both_halves_under15_home(f) is False
+
+    def test_odd_total_true(self):
+        assert eval_odd_total_home(self.make_fixture(2, 1)) is True
+
+    def test_odd_total_false(self):
+        assert eval_odd_total_home(self.make_fixture(2, 0)) is False
+
+    def test_odd_total_none(self):
+        assert eval_odd_total_home(self.make_fixture(None, None)) is None
+
+    def test_hsh_1h_true(self):
+        """1H 2-0, FT 2-1 → 1st half had 2, 2nd had 1 → True."""
+        f = self.make_fixture(2, 1, 2, 0)
+        assert eval_hsh_1h_home(f) is True
+
+    def test_hsh_1h_false(self):
+        """1H 0-0, FT 2-1 → 2nd half higher → False."""
+        f = self.make_fixture(2, 1, 0, 0)
+        assert eval_hsh_1h_home(f) is False
+
+    def test_ht_00_true(self):
+        assert eval_ht_00_home(self.make_fixture(2, 1, 0, 0)) is True
+
+    def test_ht_00_false(self):
+        assert eval_ht_00_home(self.make_fixture(2, 1, 1, 0)) is False
+
+    def test_ht_00_none(self):
+        assert eval_ht_00_home(self.make_fixture(2, 1, None, None)) is None
+
+    def test_htft_hh_home_true(self):
+        """Home leads at HT and wins FT."""
+        f = self.make_fixture(2, 1, 1, 0)
+        assert eval_htft_hh_home(f) is True
+
+    def test_htft_hh_home_false_ht_not_leading(self):
+        f = self.make_fixture(2, 1, 0, 0)
+        assert eval_htft_hh_home(f) is False
+
+    def test_htft_hh_away_true(self):
+        f = self.make_fixture(1, 2, 0, 1)
+        assert eval_htft_hh_away(f) is True
+
+    def test_htft_dh_home_true(self):
+        """HT draw, home wins FT."""
+        f = self.make_fixture(2, 1, 1, 1)
+        assert eval_htft_dh_home(f) is True
+
+    def test_htft_dh_home_false_not_draw_at_ht(self):
+        f = self.make_fixture(2, 1, 1, 0)
+        assert eval_htft_dh_home(f) is False
+
+    def test_htft_dh_away_true(self):
+        f = self.make_fixture(1, 2, 1, 1)
+        assert eval_htft_dh_away(f) is True
+
+    def test_htft_none(self):
+        assert eval_htft_hh_home(self.make_fixture(2, 1, None, None)) is None
+
+
+class TestSession5AMultiscoreMarkets:
+    """Multiscore group evaluations — exact scoreline membership checks."""
+
+    def make_fixture(self, ft_h, ft_a) -> dict:
+        return {'ft_home': ft_h, 'ft_away': ft_a}
+
+    def test_ms_home_nil_low_true(self):
+        assert eval_ms_home_nil_low_home(self.make_fixture(2, 0)) is True
+
+    def test_ms_home_nil_low_false(self):
+        assert eval_ms_home_nil_low_home(self.make_fixture(4, 0)) is False
+
+    def test_ms_away_nil_low_true(self):
+        assert eval_ms_away_nil_low_home(self.make_fixture(0, 2)) is True
+
+    def test_ms_home_blowout_true(self):
+        assert eval_ms_home_blowout_home(self.make_fixture(5, 0)) is True
+
+    def test_ms_home_blowout_false(self):
+        assert eval_ms_home_blowout_home(self.make_fixture(3, 0)) is False
+
+    def test_ms_away_blowout_true(self):
+        assert eval_ms_away_blowout_home(self.make_fixture(0, 6)) is True
+
+    def test_ms_home_comfort_true(self):
+        assert eval_ms_home_comfort_home(self.make_fixture(3, 1)) is True
+
+    def test_ms_home_comfort_false(self):
+        assert eval_ms_home_comfort_home(self.make_fixture(3, 0)) is False
+
+    def test_ms_away_comfort_true(self):
+        assert eval_ms_away_comfort_home(self.make_fixture(1, 3)) is True
+
+    def test_ms_high_home_true(self):
+        assert eval_ms_high_home_home(self.make_fixture(4, 3)) is True
+
+    def test_ms_high_home_false(self):
+        assert eval_ms_high_home_home(self.make_fixture(2, 1)) is False
+
+    def test_ms_high_away_true(self):
+        assert eval_ms_high_away_home(self.make_fixture(1, 5)) is True
+
+    def test_ms_draw_true(self):
+        assert eval_ms_draw_home(self.make_fixture(1, 1)) is True
+
+    def test_ms_draw_false(self):
+        assert eval_ms_draw_home(self.make_fixture(1, 0)) is False
+
+    def test_ms_draw_edge_00(self):
+        assert eval_ms_draw_home(self.make_fixture(0, 0)) is True
+
+    def test_ms_none(self):
+        assert eval_ms_draw_home(self.make_fixture(None, None)) is None
+
+
+class TestEventBasedNoGoalMarkets:
+    """no_goal_5min / no_goal_10min — event-driven evaluation path."""
+
+    def _make_cursor(self, goal_count: int):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (goal_count,)
+        return cursor
+
+    def test_no_goal_true_when_zero_goals(self):
+        cursor = self._make_cursor(0)
+        assert evaluate_no_goal_minutes('fixture-1', 5, cursor) is True
+
+    def test_no_goal_false_when_goal_exists(self):
+        cursor = self._make_cursor(1)
+        assert evaluate_no_goal_minutes('fixture-1', 5, cursor) is False
+
+    def test_no_goal_query_includes_penalty(self):
+        """Regression guard: penalties are their own event_type in
+        fixture_events (distinct from 'missed_pen'), and must be counted
+        alongside 'goal'/'own_goal' or scored penalties get missed."""
+        cursor = self._make_cursor(0)
+        evaluate_no_goal_minutes('fixture-1', 5, cursor)
+        executed_sql = cursor.execute.call_args[0][0]
+        assert "'penalty'" in executed_sql
+        assert "'goal'" in executed_sql
+        assert "'own_goal'" in executed_sql
+
+    def test_no_goal_market_builds_streak_and_trend(self):
+        cursor = MagicMock()
+        # 3 fixtures: no goal early, goal early, no goal early (newest first)
+        cursor.fetchone.side_effect = [(0,), (2,), (0,)]
+        fixtures = [{'id': 'f1'}, {'id': 'f2'}, {'id': 'f3'}]
+        streak, trend, evals = evaluate_no_goal_market(fixtures, 10, cursor)
+        assert evals == [True, False, True]
+        assert streak == 1  # newest (True) breaks at index 1 (False)
+        assert trend == 2

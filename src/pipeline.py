@@ -154,7 +154,7 @@ def run_pipeline(days_ahead: int = None) -> None:
     """
     import os
     if days_ahead is None:
-        days_ahead = int(os.getenv('DAYS_AHEAD', '7'))
+        days_ahead = int(os.getenv('DAYS_AHEAD', '3'))
 
     pipeline_run_id = (
         f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
@@ -231,6 +231,19 @@ def run_pipeline(days_ahead: int = None) -> None:
         rows_written=rows_written,
         pipeline_run_id=pipeline_run_id,
     )
+
+    # Step 5: SPREADSHEET EXPORT
+    from src.config import SPREADSHEET_ENABLED
+    if SPREADSHEET_ENABLED:
+        from src.spreadsheet_exporter import build_spreadsheet, send_telegram_document
+        filepath = build_spreadsheet(scan_results, pipeline_run_id)
+        if filepath:
+            caption = (
+                f"📊 STREAK Signals — {len(scan_results)} fixtures scanned\n"
+                f"🔴 {len(high_signals)} HIGH | 🟡 {len(moderate_signals)} MODERATE\n"
+                f"Run: {pipeline_run_id}"
+            )
+            send_telegram_document(filepath, caption)
 
     logger.info(f"=== Pipeline Run Complete: {pipeline_run_id} ===")
 

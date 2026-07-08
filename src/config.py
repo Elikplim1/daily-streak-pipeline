@@ -22,6 +22,9 @@ TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
 SHADOW_MODE: bool = os.getenv("SHADOW_MODE", "true").lower() == "true"
 
+# ── Spreadsheet export ────────────────────────────────────────────────────────
+SPREADSHEET_ENABLED: bool = os.getenv("SPREADSHEET_ENABLED", "true").lower() == "true"
+
 # ── Signal thresholds ─────────────────────────────────────────────────────────
 # Three-lens streak model: venue_specific, overall, divergence_flag
 # A fixture scores 0-5 across both teams × both lenses (venue + overall)
@@ -45,11 +48,30 @@ STREAK_WINDOW: int = 5
 HIGH_SIGNAL_MIN: int = 5
 MODERATE_SIGNAL_MIN: int = 4
 
-# All 11 markets scanned by the pipeline
+# All 39 markets scanned by the pipeline (11 original + 28 added in Session 5A)
 SCAN_MARKETS: list[str] = [
+    # === EXISTING 11 ===
     "ft_win", "ht_win",
     "dc_1x_ft", "dc_x2_ft", "dc_1x_ht", "dc_x2_ht",
     "gg_ft", "over_2_5", "under_2_5", "under_3_5", "hsh_2h",
+    # === NEW SCORE-BASED (Session 5A) ===
+    "over_1_5", "under_1_5", "over_4_5",
+    "btts_over25",
+    "ht_00",
+    "no_win_nil_home", "no_win_nil_away",
+    "no_home_2plus", "no_away_2plus",
+    "no_home_3plus", "no_away_3plus",
+    "no_both_halves_over05", "both_halves_under15",
+    "odd_total_ft", "hsh_1h",
+    "htft_home_home", "htft_draw_home",
+    # === MULTISCORE GROUPS (Session 5A) ===
+    "ms_home_nil_low", "ms_away_nil_low",
+    "ms_home_blowout", "ms_away_blowout",
+    "ms_home_comfort", "ms_away_comfort",
+    "ms_high_home", "ms_high_away",
+    "ms_draw",
+    # === EVENT-BASED (Session 5A) ===
+    "no_goal_5min", "no_goal_10min",
 ]
 
 # Legacy alias kept for backwards compatibility

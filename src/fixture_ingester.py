@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 
 HEADERS = {"x-apisports-key": API_FOOTBALL_KEY}
 
+# Fixture statuses considered "completed" for stats-ingestion purposes.
+COMPLETED_STATUSES = ('FT', 'AET', 'PEN')
+
 
 # ─── API Layer ───────────────────────────────────────────────────────
 
@@ -322,6 +325,121 @@ def upsert_fixture(cursor, cache: EntityCache, api_fixture: dict) -> Optional[st
         return None
 
 
+# ─── Stats Ingestion ─────────────────────────────────────────────────
+
+def fetch_fixture_stats(source_match_id: int) -> list:
+    """Fetch match statistics from API-Football for a completed fixture."""
+    url = f"{API_FOOTBALL_BASE_URL}/fixtures/statistics"
+    params = {"fixture": source_match_id}
+    try:
+        resp = requests.get(url, headers=HEADERS, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("response", [])
+    except Exception as e:
+        logger.error(f"Stats fetch failed for {source_match_id}: {e}")
+        return []
+
+
+def _parse_stat(stat_dict: dict, key: str):
+    """Parse a stat value, handling None, percentage strings, etc."""
+    val = stat_dict.get(key)
+    if val is None:
+        return None
+    if isinstance(val, str):
+        val = val.replace('%', '').strip()
+        if not val:
+            return None
+        try:
+            return float(val)
+        except ValueError:
+            return None
+    return val
+
+
+def maybe_ingest_stats(
+    cursor,
+    fixture_uuid: str,
+    source_match_id: str,
+    cache: EntityCache,
+    home_team_api_id: int,
+) -> bool:
+    """Fetch and store stats for a completed fixture if not already present.
+
+    Args:
+        home_team_api_id: API-Football numeric id of the HOME team for this
+            fixture, used to determine venue_split per team_stats entry
+            (the API response order for the two teams is not guaranteed).
+    """
+    cursor.execute(
+        "SELECT COUNT(*) FROM fixture_stats_football WHERE fixture_id = %s",
+        (fixture_uuid,)
+    )
+    if cursor.fetchone()[0] > 0:
+        return False  # Already have stats
+
+    stats_data = fetch_fixture_stats(int(source_match_id))
+    if not stats_data:
+        return False
+
+    # API returns: [{"team": {"id": 33, "name": "..."}, "statistics": [{"type": "...", "value": ...}]}]
+    for team_stats in stats_data:
+        team_api_id = team_stats["team"]["id"]
+        team_uuid = cache.teams.get(team_api_id)
+        if not team_uuid:
+            continue
+
+        # Convert statistics array to dict
+        stat_dict = {}
+        for s in team_stats.get("statistics", []):
+            stat_dict[s["type"]] = s["value"]
+
+        venue_split = 'home' if team_api_id == home_team_api_id else 'away'
+
+        # Map API stat names to DB columns
+        cursor.execute("""
+            INSERT INTO fixture_stats_football (
+                fixture_id, team_id, venue_split, period,
+                possession, total_shots, shots_on_target,
+                corners, yellow_cards, red_cards, fouls,
+                offsides, saves, shots_off_target,
+                shots_inside_box, shots_outside_box,
+                blocked_shots, total_passes, passes_accurate,
+                pass_pct, expected_goals
+            ) VALUES (
+                %s, %s, %s, 'FT',
+                %s, %s, %s,
+                %s, %s, %s, %s,
+                %s, %s, %s,
+                %s, %s,
+                %s, %s, %s,
+                %s, %s
+            )
+            ON CONFLICT DO NOTHING
+        """, (
+            fixture_uuid, team_uuid, venue_split,
+            _parse_stat(stat_dict, 'Ball Possession'),
+            _parse_stat(stat_dict, 'Total Shots'),
+            _parse_stat(stat_dict, 'Shots on Goal'),
+            _parse_stat(stat_dict, 'Corner Kicks'),
+            _parse_stat(stat_dict, 'Yellow Cards'),
+            _parse_stat(stat_dict, 'Red Cards'),
+            _parse_stat(stat_dict, 'Fouls'),
+            _parse_stat(stat_dict, 'Offsides'),
+            _parse_stat(stat_dict, 'Goalkeeper Saves'),
+            _parse_stat(stat_dict, 'Shots off Goal'),
+            _parse_stat(stat_dict, 'Shots insidebox'),
+            _parse_stat(stat_dict, 'Shots outsidebox'),
+            _parse_stat(stat_dict, 'Blocked Shots'),
+            _parse_stat(stat_dict, 'Total passes'),
+            _parse_stat(stat_dict, 'Passes accurate'),
+            _parse_stat(stat_dict, 'Passes %'),
+            _parse_stat(stat_dict, 'expected_goals'),
+        ))
+
+    return True
+
+
 # ─── Main Ingestion Loop ─────────────────────────────────────────────
 
 def run_ingestion(days_back: int = 1, days_forward: int = 7) -> dict:
@@ -351,6 +469,7 @@ def run_ingestion(days_back: int = 1, days_forward: int = 7) -> dict:
         "new_teams_created": 0,
         "fixtures_inserted": 0,
         "fixtures_updated": 0,
+        "stats_ingested": 0,
         "errors": 0,
     }
 
@@ -390,6 +509,19 @@ def run_ingestion(days_back: int = 1, days_forward: int = 7) -> dict:
                             summary["fixtures_updated"] += 1
                         else:
                             summary["fixtures_inserted"] += 1
+
+                        # Stats ingestion: only for completed fixtures from
+                        # yesterday/today, to minimize API calls.
+                        fixture_status = api_fixture["fixture"]["status"]["short"]
+                        if (
+                            fixture_status in COMPLETED_STATUSES
+                            and current_date >= today - timedelta(days=1)
+                        ):
+                            home_api_id = int(api_fixture["teams"]["home"]["id"])
+                            if maybe_ingest_stats(
+                                cursor, result, source_id, cache, home_api_id
+                            ):
+                                summary["stats_ingested"] += 1
                     else:
                         summary["errors"] += 1
 
@@ -413,6 +545,7 @@ def run_ingestion(days_back: int = 1, days_forward: int = 7) -> dict:
     logger.info(f"  New teams:         {summary['new_teams_created']}")
     logger.info(f"  Fixtures inserted: {summary['fixtures_inserted']}")
     logger.info(f"  Fixtures updated:  {summary['fixtures_updated']}")
+    logger.info(f"  Stats ingested:    {summary['stats_ingested']}")
     logger.info(f"  Errors:            {summary['errors']}")
 
     return summary

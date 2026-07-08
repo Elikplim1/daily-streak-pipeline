@@ -10,7 +10,7 @@ fallback if the API rejects the formatted message.
 """
 import logging
 import time
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import requests
 
@@ -48,6 +48,9 @@ def build_high_signal_message(
     """
     Build the MarkdownV2 Telegram message for HIGH_SIGNAL opportunities.
 
+    Groups all HIGH_SIGNAL markets under each fixture (one block per fixture,
+    all its markets listed together) instead of one block per market.
+
     Args:
         high_signals: List of (FixtureScanResult, market_key, market_data) tuples
         pipeline_run_id: Run ID for traceability
@@ -59,45 +62,70 @@ def build_high_signal_message(
     if not high_signals:
         return None
 
+    # Group by fixture, preserving each fixture's markets in encounter order.
+    fixtures_by_id: Dict[str, dict] = {}
+    for fr, mkey, mdata in high_signals:
+        entry = fixtures_by_id.setdefault(fr.fixture_id, {'fr': fr, 'markets': []})
+        entry['markets'].append((mkey, mdata))
+
+    ordered_fixture_ids = sorted(
+        fixtures_by_id, key=lambda fid: fixtures_by_id[fid]['fr'].fixture_date or ''
+    )
+
     lines = [
-        "🔴 *STREAK ALERT — HIGH SIGNAL* 🔴",
+        (
+            f"🔴 *HIGH SIGNAL — {len(ordered_fixture_ids)} fixtures, "
+            f"{len(high_signals)} markets*"
+        ),
         "",
         escape_markdown_v2(f"Fixtures scanned: {total_fixtures}"),
-        escape_markdown_v2(f"High signals: {len(high_signals)}"),
         "",
         "━━━━━━━━━━━━━━━━━━━━━",
     ]
 
-    for fr, mkey, mdata in high_signals:
-        market = CORE_MARKETS[mkey]
-        hv = mdata['home_venue']
-        ho = mdata['home_overall']
-        av = mdata['away_venue']
-        ao = mdata['away_overall']
+    for fid in ordered_fixture_ids:
+        fr = fixtures_by_id[fid]['fr']
+        markets = fixtures_by_id[fid]['markets']
 
         home_name = escape_markdown_v2(fr.home_team_name)
         away_name = escape_markdown_v2(fr.away_team_name)
-        market_name = escape_markdown_v2(market.name)
-        date_str = escape_markdown_v2(
-            fr.fixture_date[:10] if fr.fixture_date else 'TBD'
+        league_name = escape_markdown_v2(fr.league_name)
+        fixture_date = fr.fixture_date or ''
+        date_str = escape_markdown_v2(fixture_date[:10] if fixture_date else 'TBD')
+        time_str = escape_markdown_v2(
+            fixture_date[11:16] if len(fixture_date) > 11 else '??:??'
         )
 
         lines += [
             "",
             f"⚽ *{home_name} vs {away_name}*",
-            f"📊 Market: {market_name}",
-            (
-                f"🏠 Home: {hv.streak_length}v/{ho.streak_length}o "
-                f"\\(trend {hv.trend_count}/{ho.trend_count}\\)"
-            ),
-            (
-                f"✈️ Away: {av.streak_length}v/{ao.streak_length}o "
-                f"\\(trend {av.trend_count}/{ao.trend_count}\\)"
-            ),
-            f"✅ Alignment: {escape_markdown_v2(market.match_type)}",
-            f"📅 {date_str}",
-            "━━━━━━━━━━━━━━━━━━━━━",
+            f"📅 {date_str}, {time_str} UTC \\| {league_name}",
         ]
+
+        for mkey, mdata in markets:
+            market = CORE_MARKETS[mkey]
+            hv = mdata['home_venue']
+            ho = mdata['home_overall']
+            av = mdata['away_venue']
+            ao = mdata['away_overall']
+
+            market_name = escape_markdown_v2(market.name)
+            match_type = escape_markdown_v2(market.match_type)
+
+            lines += [
+                "",
+                f"  📊 {market_name} \\({match_type}\\)",
+                (
+                    f"  🏠 Home: {hv.streak_length}v/{ho.streak_length}o "
+                    f"\\(Venue\\) \\| {hv.trend_count}/{ho.trend_count} \\(Overall\\)"
+                ),
+                (
+                    f"  ✈️ Away: {av.streak_length}v/{ao.streak_length}o "
+                    f"\\(Venue\\) \\| {av.trend_count}/{ao.trend_count} \\(Overall\\)"
+                ),
+            ]
+
+        lines.append("━━━━━━━━━━━━━━━━━━━━━")
 
     lines += [
         "",

@@ -175,6 +175,52 @@ def evaluate_team_market(
     return streak, trend, evaluations
 
 
+# Event-based markets (Session 5A): evaluated via fixture_events, not the
+# fixtures table, so they bypass the standard evaluate_home/evaluate_away
+# dispatch. Maps market_key -> minutes_threshold.
+EVENT_BASED_MARKETS: Dict[str, int] = {
+    'no_goal_5min': 5,
+    'no_goal_10min': 10,
+}
+
+
+def evaluate_no_goal_minutes(fixture_id, minutes_threshold, cursor) -> Optional[bool]:
+    """Check if there was no goal in the first N minutes of a fixture.
+
+    Includes 'penalty' alongside 'goal'/'own_goal' — scored penalties are
+    stored as their own event_type in fixture_events, distinct from
+    'missed_pen' (confirmed via Step 0 schema discovery).
+    """
+    cursor.execute("""
+        SELECT COUNT(*) FROM fixture_events
+        WHERE fixture_id = %s
+          AND event_type IN ('goal', 'own_goal', 'penalty')
+          AND minute <= %s
+    """, (fixture_id, minutes_threshold))
+    goal_count = cursor.fetchone()[0]
+    return goal_count == 0  # True = no goal in first N minutes
+
+
+def evaluate_no_goal_market(
+    fixtures: List[dict],
+    minutes_threshold: int,
+    cursor,
+) -> Tuple[int, int, List[Optional[bool]]]:
+    """
+    Evaluate a 'no goal in first N minutes' market across a list of fixtures.
+
+    Unlike evaluate_team_market, this doesn't depend on which side (home/away)
+    the team played in each historical fixture — the market only cares
+    whether any goal was scored early, regardless of who scored it.
+    """
+    evaluations = [
+        evaluate_no_goal_minutes(f['id'], minutes_threshold, cursor)
+        for f in fixtures
+    ]
+    streak, trend = calculate_streak_and_trend(evaluations)
+    return streak, trend, evaluations
+
+
 def scan_fixture(fixture: dict, cursor) -> FixtureScanResult:
     """
     Run the complete streak scan for one fixture across all Core markets.
@@ -207,18 +253,33 @@ def scan_fixture(fixture: dict, cursor) -> FixtureScanResult:
     )
 
     for mkey, market in CORE_MARKETS.items():
-        h_venue_streak, h_venue_trend, h_venue_evals = evaluate_team_market(
-            home_home_fixtures, market, home_id
-        )
-        h_overall_streak, h_overall_trend, h_overall_evals = evaluate_team_market(
-            home_overall_fixtures, market, home_id
-        )
-        a_venue_streak, a_venue_trend, a_venue_evals = evaluate_team_market(
-            away_away_fixtures, market, away_id
-        )
-        a_overall_streak, a_overall_trend, a_overall_evals = evaluate_team_market(
-            away_overall_fixtures, market, away_id
-        )
+        if mkey in EVENT_BASED_MARKETS:
+            minutes = EVENT_BASED_MARKETS[mkey]
+            h_venue_streak, h_venue_trend, h_venue_evals = evaluate_no_goal_market(
+                home_home_fixtures, minutes, cursor
+            )
+            h_overall_streak, h_overall_trend, h_overall_evals = evaluate_no_goal_market(
+                home_overall_fixtures, minutes, cursor
+            )
+            a_venue_streak, a_venue_trend, a_venue_evals = evaluate_no_goal_market(
+                away_away_fixtures, minutes, cursor
+            )
+            a_overall_streak, a_overall_trend, a_overall_evals = evaluate_no_goal_market(
+                away_overall_fixtures, minutes, cursor
+            )
+        else:
+            h_venue_streak, h_venue_trend, h_venue_evals = evaluate_team_market(
+                home_home_fixtures, market, home_id
+            )
+            h_overall_streak, h_overall_trend, h_overall_evals = evaluate_team_market(
+                home_overall_fixtures, market, home_id
+            )
+            a_venue_streak, a_venue_trend, a_venue_evals = evaluate_team_market(
+                away_away_fixtures, market, away_id
+            )
+            a_overall_streak, a_overall_trend, a_overall_evals = evaluate_team_market(
+                away_overall_fixtures, market, away_id
+            )
 
         result.market_results[mkey] = {
             'home_venue': StreakResult(

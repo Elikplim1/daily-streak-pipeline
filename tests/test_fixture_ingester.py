@@ -2,8 +2,10 @@
 Unit tests for the fixture ingester — tests parsing and entity resolution
 without hitting the API or Supabase.
 """
+from unittest.mock import MagicMock, patch
+
 import pytest
-from src.fixture_ingester import EntityCache
+from src.fixture_ingester import EntityCache, _parse_stat, maybe_ingest_stats
 
 
 class TestEntityCache:
@@ -145,3 +147,109 @@ class TestAPIResponseParsing:
         f = self.SAMPLE_FIXTURE
         assert isinstance(f["league"]["id"], int)
         assert isinstance(f["teams"]["home"]["id"], int)
+
+
+class TestParseStat:
+    """_parse_stat: handles None, ints, and percentage strings from the API."""
+
+    def test_none_value(self):
+        assert _parse_stat({'Fouls': None}, 'Fouls') is None
+
+    def test_missing_key(self):
+        assert _parse_stat({}, 'Fouls') is None
+
+    def test_plain_int(self):
+        assert _parse_stat({'Total Shots': 12}, 'Total Shots') == 12
+
+    def test_percentage_string(self):
+        assert _parse_stat({'Ball Possession': '55%'}, 'Ball Possession') == 55.0
+
+    def test_percentage_string_with_whitespace(self):
+        assert _parse_stat({'Passes %': ' 87% '}, 'Passes %') == 87.0
+
+    def test_empty_string(self):
+        assert _parse_stat({'Fouls': ''}, 'Fouls') is None
+
+    def test_non_numeric_string(self):
+        assert _parse_stat({'Fouls': 'N/A'}, 'Fouls') is None
+
+    def test_decimal_string(self):
+        assert _parse_stat({'expected_goals': '1.83'}, 'expected_goals') == 1.83
+
+
+class TestMaybeIngestStats:
+    """maybe_ingest_stats: skip-if-exists, venue_split resolution, unknown-team handling."""
+
+    def test_skips_if_stats_already_exist(self):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (1,)  # count > 0
+        cache = EntityCache()
+
+        result = maybe_ingest_stats(cursor, 'fixture-uuid', '12345', cache, home_team_api_id=33)
+
+        assert result is False
+        assert cursor.execute.call_count == 1  # only the existence check ran
+
+    @patch('src.fixture_ingester.fetch_fixture_stats')
+    def test_skips_if_api_returns_no_stats(self, mock_fetch):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (0,)
+        mock_fetch.return_value = []
+        cache = EntityCache()
+
+        result = maybe_ingest_stats(cursor, 'fixture-uuid', '12345', cache, home_team_api_id=33)
+
+        assert result is False
+
+    @patch('src.fixture_ingester.fetch_fixture_stats')
+    def test_inserts_stats_with_correct_venue_split(self, mock_fetch):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (0,)
+        mock_fetch.return_value = [
+            {
+                'team': {'id': 34, 'name': 'Away FC'},  # API order != home-first
+                'statistics': [{'type': 'Ball Possession', 'value': '40%'}],
+            },
+            {
+                'team': {'id': 33, 'name': 'Home FC'},
+                'statistics': [
+                    {'type': 'Ball Possession', 'value': '60%'},
+                    {'type': 'Corner Kicks', 'value': 5},
+                ],
+            },
+        ]
+        cache = EntityCache()
+        cache.teams[33] = 'home-uuid'
+        cache.teams[34] = 'away-uuid'
+
+        result = maybe_ingest_stats(cursor, 'fixture-uuid', '12345', cache, home_team_api_id=33)
+
+        assert result is True
+        insert_calls = [
+            c for c in cursor.execute.call_args_list
+            if 'INSERT INTO fixture_stats_football' in c[0][0]
+        ]
+        assert len(insert_calls) == 2
+
+        by_team_uuid = {c[0][1][1]: c[0][1] for c in insert_calls}
+        assert by_team_uuid['away-uuid'][2] == 'away'  # venue_split
+        assert by_team_uuid['home-uuid'][2] == 'home'
+        assert by_team_uuid['home-uuid'][0] == 'fixture-uuid'
+
+    @patch('src.fixture_ingester.fetch_fixture_stats')
+    def test_skips_unknown_team_without_crashing(self, mock_fetch):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (0,)
+        mock_fetch.return_value = [
+            {'team': {'id': 999, 'name': 'Unknown FC'}, 'statistics': []},
+        ]
+        cache = EntityCache()  # empty — team 999 not resolvable
+
+        result = maybe_ingest_stats(cursor, 'fixture-uuid', '12345', cache, home_team_api_id=999)
+
+        assert result is True  # loop ran, just produced no inserts
+        insert_calls = [
+            c for c in cursor.execute.call_args_list
+            if 'INSERT INTO fixture_stats_football' in c[0][0]
+        ]
+        assert len(insert_calls) == 0
