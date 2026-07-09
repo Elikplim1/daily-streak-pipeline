@@ -57,6 +57,73 @@ _INSERT_SQL = """
 """
 
 
+def start_pipeline_run(
+    pipeline_run_id: str,
+    days_ahead: int,
+    ingest_enabled: bool,
+) -> None:
+    """Insert the initial pipeline_runs row with status='RUNNING'."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO pipeline_runs (
+                id, status, shadow_mode, days_ahead, ingest_enabled, markets_count
+            ) VALUES (%s, 'RUNNING', %s, %s, %s, %s)
+        """, (
+            pipeline_run_id, SHADOW_MODE, days_ahead, ingest_enabled, len(SCAN_MARKETS),
+        ))
+        conn.commit()
+
+
+def complete_pipeline_run(pipeline_run_id: str, **counts) -> None:
+    """Update the pipeline_runs row with status='COMPLETE' and final counts.
+
+    Accepted keys in counts (all optional, default to the column's own
+    default if omitted): fixtures_ingested_new, fixtures_ingested_updated,
+    new_leagues, new_teams, fixtures_scanned, high_signal, moderate_signal,
+    tracking, rows_written, write_errors, telegram_summary_sent,
+    telegram_alerts_sent, telegram_error, spreadsheet_sent.
+    """
+    columns = [
+        'fixtures_ingested_new', 'fixtures_ingested_updated',
+        'new_leagues', 'new_teams', 'fixtures_scanned',
+        'high_signal', 'moderate_signal', 'tracking',
+        'rows_written', 'write_errors',
+        'telegram_summary_sent', 'telegram_alerts_sent', 'telegram_error',
+        'spreadsheet_sent',
+    ]
+    set_clause = ", ".join(f"{col} = %s" for col in columns)
+    values = [counts.get(col) for col in columns]
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            UPDATE pipeline_runs
+            SET completed_at = NOW(), status = 'COMPLETE', {set_clause}
+            WHERE id = %s
+        """, (*values, pipeline_run_id))
+        conn.commit()
+
+
+def fail_pipeline_run(pipeline_run_id: str, error_message: str) -> None:
+    """Update the pipeline_runs row with status='FAILED' and error_message.
+
+    Best-effort — logs and swallows its own errors so a secondary DB
+    failure while recording the original failure doesn't mask it.
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE pipeline_runs
+                SET completed_at = NOW(), status = 'FAILED', error_message = %s
+                WHERE id = %s
+            """, (error_message[:2000], pipeline_run_id))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to record pipeline failure in pipeline_runs: {e}")
+
+
 def load_results_to_supabase(
     scan_results: List[FixtureScanResult],
     pipeline_run_id: str,
@@ -151,10 +218,17 @@ def run_pipeline(days_ahead: int = None) -> None:
     2. TRANSFORM: correlation / alignment checks
     3. LOAD: write to flagged_opportunities (ON CONFLICT upsert)
     4. NOTIFY: Telegram summary + HIGH_SIGNAL alerts (shadow mode safe)
+
+    Every run is logged to pipeline_runs: a 'RUNNING' row at the start,
+    updated to 'COMPLETE' with final counts on success, or 'FAILED' with
+    error_message on any uncaught exception. The exception is always
+    re-raised after being recorded, so CI still fails loudly — this table
+    is for observability, not for swallowing failures.
     """
     import os
     if days_ahead is None:
         days_ahead = int(os.getenv('DAYS_AHEAD', '3'))
+    ingest_enabled = os.getenv("INGEST_ENABLED", "true").lower() == "true"
 
     pipeline_run_id = (
         f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
@@ -164,88 +238,125 @@ def run_pipeline(days_ahead: int = None) -> None:
     logger.info(f"Markets: {SCAN_MARKETS}")
     logger.info(f"Scan window: {days_ahead} days ahead")
 
-    # Phase 0: INGEST new fixtures from API-Football
-    import os
-    ingest_enabled = os.getenv("INGEST_ENABLED", "true").lower() == "true"
-    if ingest_enabled and API_FOOTBALL_KEY:
-        logger.info("Phase 0: Ingesting fixtures from API-Football...")
-        from src.fixture_ingester import run_ingestion
-        ingest_summary = run_ingestion(days_back=1, days_forward=days_ahead)
-        logger.info(
-            f"Ingestion complete: {ingest_summary['fixtures_inserted']} new, "
-            f"{ingest_summary['fixtures_updated']} updated, "
-            f"{ingest_summary['new_leagues_created']} new leagues, "
-            f"{ingest_summary['new_teams_created']} new teams"
-        )
-    else:
-        logger.info("Phase 0: Fixture ingestion skipped (INGEST_ENABLED=false or no API key)")
+    start_pipeline_run(pipeline_run_id, days_ahead, ingest_enabled)
 
-    # Phase 1: EXTRACT + TRANSFORM (streak scan)
-    logger.info("Phase 1: Scanning upcoming fixtures for streaks...")
-    scan_results = scan_all_upcoming(days_ahead)
-
-    if not scan_results:
-        logger.info("No upcoming fixtures found. Pipeline complete.")
-        return
-
-    # Phase 2: TRANSFORM (alignment)
-    logger.info("Phase 2: Applying correlation checks...")
-    scan_results = apply_alignment(scan_results)
-
-    # Phase 3: LOAD
-    logger.info("Phase 3: Loading results to Supabase...")
-    rows_written, errors = load_results_to_supabase(scan_results, pipeline_run_id)
-
-    # Phase 4: NOTIFY
-    high_signals = [
-        (fr, mkey, md)
-        for fr in scan_results
-        for mkey, md in fr.market_results.items()
-        if md['signal_tier'] == 'HIGH_SIGNAL'
-    ]
-    moderate_signals = [
-        (fr, mkey, md)
-        for fr in scan_results
-        for mkey, md in fr.market_results.items()
-        if md['signal_tier'] == 'MODERATE_SIGNAL'
-    ]
-    tracking_count = sum(
-        1 for fr in scan_results
-        for md in fr.market_results.values()
-        if md['signal_tier'] == 'TRACKING'
-    )
-
-    logger.info("=== Run Complete ===")
-    logger.info(f"Fixtures scanned:  {len(scan_results)}")
-    logger.info(f"HIGH_SIGNAL:       {len(high_signals)}")
-    logger.info(f"MODERATE_SIGNAL:   {len(moderate_signals)}")
-    logger.info(f"Rows written:      {rows_written}")
-
-    from src.telegram_notifier import send_alerts
-    send_alerts(
-        high_signals=high_signals,
-        total_fixtures=len(scan_results),
-        high_count=len(high_signals),
-        moderate_count=len(moderate_signals),
-        tracking_count=tracking_count,
-        rows_written=rows_written,
-        pipeline_run_id=pipeline_run_id,
-    )
-
-    # Step 5: SPREADSHEET EXPORT
-    from src.config import SPREADSHEET_ENABLED
-    if SPREADSHEET_ENABLED:
-        from src.spreadsheet_exporter import build_spreadsheet, send_telegram_document
-        filepath = build_spreadsheet(scan_results, pipeline_run_id)
-        if filepath:
-            caption = (
-                f"📊 STREAK Signals — {len(scan_results)} fixtures scanned\n"
-                f"🔴 {len(high_signals)} HIGH | 🟡 {len(moderate_signals)} MODERATE\n"
-                f"Run: {pipeline_run_id}"
+    try:
+        # Phase 0: INGEST new fixtures from API-Football
+        ingest_summary = None
+        if ingest_enabled and API_FOOTBALL_KEY:
+            logger.info("Phase 0: Ingesting fixtures from API-Football...")
+            from src.fixture_ingester import run_ingestion
+            ingest_summary = run_ingestion(days_back=1, days_forward=days_ahead)
+            logger.info(
+                f"Ingestion complete: {ingest_summary['fixtures_inserted']} new, "
+                f"{ingest_summary['fixtures_updated']} updated, "
+                f"{ingest_summary['new_leagues_created']} new leagues, "
+                f"{ingest_summary['new_teams_created']} new teams"
             )
-            send_telegram_document(filepath, caption)
+        else:
+            logger.info("Phase 0: Fixture ingestion skipped (INGEST_ENABLED=false or no API key)")
 
-    logger.info(f"=== Pipeline Run Complete: {pipeline_run_id} ===")
+        # Phase 1: EXTRACT + TRANSFORM (streak scan)
+        logger.info("Phase 1: Scanning upcoming fixtures for streaks...")
+        scan_results = scan_all_upcoming(days_ahead)
+
+        if not scan_results:
+            logger.info("No upcoming fixtures found. Pipeline complete.")
+            complete_pipeline_run(
+                pipeline_run_id,
+                fixtures_ingested_new=ingest_summary['fixtures_inserted'] if ingest_summary else 0,
+                fixtures_ingested_updated=ingest_summary['fixtures_updated'] if ingest_summary else 0,
+                new_leagues=ingest_summary['new_leagues_created'] if ingest_summary else 0,
+                new_teams=ingest_summary['new_teams_created'] if ingest_summary else 0,
+                fixtures_scanned=0, high_signal=0, moderate_signal=0, tracking=0,
+                rows_written=0, write_errors=0,
+                telegram_summary_sent=False, telegram_alerts_sent=False, telegram_error=None,
+                spreadsheet_sent=False,
+            )
+            return
+
+        # Phase 2: TRANSFORM (alignment)
+        logger.info("Phase 2: Applying correlation checks...")
+        scan_results = apply_alignment(scan_results)
+
+        # Phase 3: LOAD
+        logger.info("Phase 3: Loading results to Supabase...")
+        rows_written, errors = load_results_to_supabase(scan_results, pipeline_run_id)
+
+        # Phase 4: NOTIFY
+        high_signals = [
+            (fr, mkey, md)
+            for fr in scan_results
+            for mkey, md in fr.market_results.items()
+            if md['signal_tier'] == 'HIGH_SIGNAL'
+        ]
+        moderate_signals = [
+            (fr, mkey, md)
+            for fr in scan_results
+            for mkey, md in fr.market_results.items()
+            if md['signal_tier'] == 'MODERATE_SIGNAL'
+        ]
+        tracking_count = sum(
+            1 for fr in scan_results
+            for md in fr.market_results.values()
+            if md['signal_tier'] == 'TRACKING'
+        )
+
+        logger.info("=== Run Complete ===")
+        logger.info(f"Fixtures scanned:  {len(scan_results)}")
+        logger.info(f"HIGH_SIGNAL:       {len(high_signals)}")
+        logger.info(f"MODERATE_SIGNAL:   {len(moderate_signals)}")
+        logger.info(f"Rows written:      {rows_written}")
+
+        from src.telegram_notifier import send_alerts
+        telegram_status = send_alerts(
+            high_signals=high_signals,
+            total_fixtures=len(scan_results),
+            high_count=len(high_signals),
+            moderate_count=len(moderate_signals),
+            tracking_count=tracking_count,
+            rows_written=rows_written,
+            pipeline_run_id=pipeline_run_id,
+        )
+
+        # Step 5: SPREADSHEET EXPORT
+        from src.config import SPREADSHEET_ENABLED
+        spreadsheet_sent = False
+        if SPREADSHEET_ENABLED:
+            from src.spreadsheet_exporter import build_spreadsheet, send_telegram_document
+            filepath = build_spreadsheet(scan_results, pipeline_run_id)
+            if filepath:
+                caption = (
+                    f"📊 STREAK Signals — {len(scan_results)} fixtures scanned\n"
+                    f"🔴 {len(high_signals)} HIGH | 🟡 {len(moderate_signals)} MODERATE\n"
+                    f"Run: {pipeline_run_id}"
+                )
+                spreadsheet_sent = send_telegram_document(filepath, caption)
+
+        complete_pipeline_run(
+            pipeline_run_id,
+            fixtures_ingested_new=ingest_summary['fixtures_inserted'] if ingest_summary else 0,
+            fixtures_ingested_updated=ingest_summary['fixtures_updated'] if ingest_summary else 0,
+            new_leagues=ingest_summary['new_leagues_created'] if ingest_summary else 0,
+            new_teams=ingest_summary['new_teams_created'] if ingest_summary else 0,
+            fixtures_scanned=len(scan_results),
+            high_signal=len(high_signals),
+            moderate_signal=len(moderate_signals),
+            tracking=tracking_count,
+            rows_written=rows_written,
+            write_errors=errors,
+            telegram_summary_sent=telegram_status['summary_sent'],
+            telegram_alerts_sent=telegram_status['alerts_sent'],
+            telegram_error=telegram_status['error'],
+            spreadsheet_sent=spreadsheet_sent,
+        )
+
+        logger.info(f"=== Pipeline Run Complete: {pipeline_run_id} ===")
+
+    except Exception as e:
+        logger.error(f"=== Pipeline Run Failed: {pipeline_run_id}: {e} ===", exc_info=True)
+        fail_pipeline_run(pipeline_run_id, str(e))
+        raise
 
 
 if __name__ == '__main__':

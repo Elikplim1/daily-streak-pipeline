@@ -252,7 +252,7 @@ def send_alerts(
     tracking_count: int,
     rows_written: int,
     pipeline_run_id: str,
-) -> None:
+) -> dict:
     """
     Main entry point: send Telegram alerts based on SHADOW_MODE.
 
@@ -263,15 +263,26 @@ def send_alerts(
     Live mode (SHADOW_MODE=false):
       - Sends the daily summary
       - Sends detailed HIGH_SIGNAL alert with streak breakdowns
+
+    Returns:
+        dict with 'summary_sent' (bool), 'alerts_sent' (bool), and 'error'
+        (str or None) — used by pipeline.py to populate the pipeline_runs
+        health table's telegram_summary_sent/telegram_alerts_sent/telegram_error.
+        alerts_sent is always False in shadow mode (the alert is only logged,
+        never sent to the API).
     """
     summary = build_summary_message(
         total_fixtures, high_count, moderate_count,
         tracking_count, rows_written, pipeline_run_id,
     )
 
+    summary_sent = False
+    alerts_sent = False
+    error = None
+
     if SHADOW_MODE:
         logger.info("SHADOW MODE — sending summary only")
-        send_telegram_message(summary)
+        summary_sent = send_telegram_message(summary)
 
         if high_signals:
             alert_msg = build_high_signal_message(
@@ -282,7 +293,7 @@ def send_alerts(
 
     else:
         logger.info("LIVE MODE — sending summary + HIGH_SIGNAL alerts")
-        send_telegram_message(summary)
+        summary_sent = send_telegram_message(summary)
 
         if high_signals:
             time.sleep(1)  # Respect Telegram rate limit (30 msg/s)
@@ -290,9 +301,16 @@ def send_alerts(
                 high_signals, pipeline_run_id, total_fixtures
             )
             if alert_msg:
-                send_telegram_message(alert_msg, parse_mode='MarkdownV2')
+                alerts_sent = send_telegram_message(alert_msg, parse_mode='MarkdownV2')
+
+    if not summary_sent:
+        error = "Failed to send summary message (see logs for details)"
+    elif high_signals and not SHADOW_MODE and not alerts_sent:
+        error = "Failed to send HIGH_SIGNAL alert (see logs for details)"
 
     logger.info(
         f"Telegram notify complete: shadow={SHADOW_MODE}, "
         f"high_signals={len(high_signals)}"
     )
+
+    return {'summary_sent': summary_sent, 'alerts_sent': alerts_sent, 'error': error}
