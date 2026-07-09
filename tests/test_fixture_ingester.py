@@ -5,7 +5,7 @@ without hitting the API or Supabase.
 from unittest.mock import MagicMock, patch
 
 import pytest
-from src.fixture_ingester import EntityCache, _parse_stat, maybe_ingest_stats
+from src.fixture_ingester import EntityCache, _parse_stat, maybe_ingest_stats, run_ingestion
 
 
 class TestEntityCache:
@@ -253,3 +253,123 @@ class TestMaybeIngestStats:
             if 'INSERT INTO fixture_stats_football' in c[0][0]
         ]
         assert len(insert_calls) == 0
+
+
+class TestRunIngestionSavepointIsolation:
+    """A single fixture failure must not poison the rest of the date's batch.
+
+    Mocks the whole DB layer (get_connection, EntityCache) and API layer
+    (fetch_fixtures_by_date, upsert_fixture) so this exercises the actual
+    savepoint sequencing in run_ingestion()'s loop without a real database.
+    """
+
+    def _make_api_fixture(self, fixture_id):
+        return {
+            "fixture": {"id": fixture_id, "date": "2026-07-08T12:00:00+00:00", "status": {"short": "NS"}},
+            "league": {"id": 39, "name": "Premier League", "country": "England", "season": 2026},
+            "teams": {
+                "home": {"id": 100, "name": "Home FC", "logo": ""},
+                "away": {"id": 200, "name": "Away FC", "logo": ""},
+            },
+            "goals": {"home": None, "away": None},
+            "score": {"halftime": {"home": None, "away": None}, "fulltime": {"home": None, "away": None}},
+        }
+
+    @patch('src.fixture_ingester.time.sleep')
+    @patch('src.fixture_ingester.upsert_fixture')
+    @patch('src.fixture_ingester.fetch_fixtures_by_date')
+    @patch('src.fixture_ingester.get_connection')
+    @patch.object(EntityCache, 'load_from_db')
+    def test_failed_fixture_does_not_block_the_next_one(
+        self, mock_load_cache, mock_get_connection, mock_fetch_dates, mock_upsert, mock_sleep,
+    ):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = None  # "existed" check: not found, for both fixtures
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+        mock_get_connection.return_value.__enter__.return_value = conn
+        mock_get_connection.return_value.__exit__.return_value = False
+
+        bad_fixture = self._make_api_fixture(111)
+        good_fixture = self._make_api_fixture(222)
+        mock_fetch_dates.return_value = [bad_fixture, good_fixture]
+
+        # First upsert raises (simulating a DB error mid-INSERT); second succeeds.
+        mock_upsert.side_effect = [Exception("simulated INSERT failure"), "new-fixture-uuid"]
+
+        summary = run_ingestion(days_back=0, days_forward=0)
+
+        # The failing fixture is counted as an error, but the good one still
+        # gets processed and counted — proving isolation between the two.
+        assert summary["errors"] == 1
+        assert summary["fixtures_inserted"] == 1
+
+        executed_sql = [c[0][0] for c in cursor.execute.call_args_list]
+        savepoint_calls = [s for s in executed_sql if 'SAVEPOINT' in s]
+        # One SAVEPOINT + one terminator (RELEASE or ROLLBACK TO) per fixture.
+        assert savepoint_calls.count('SAVEPOINT fixture_sp') == 2
+        assert 'ROLLBACK TO SAVEPOINT fixture_sp' in savepoint_calls
+        assert 'RELEASE SAVEPOINT fixture_sp' in savepoint_calls
+
+        # The rollback must come before the second fixture's own SAVEPOINT —
+        # i.e. the transaction was un-aborted before moving on.
+        first_savepoint_idx = savepoint_calls.index('SAVEPOINT fixture_sp')
+        rollback_idx = savepoint_calls.index('ROLLBACK TO SAVEPOINT fixture_sp')
+        second_savepoint_idx = len(savepoint_calls) - 1 - savepoint_calls[::-1].index('SAVEPOINT fixture_sp')
+        assert first_savepoint_idx < rollback_idx < second_savepoint_idx
+
+    @patch('src.fixture_ingester.time.sleep')
+    @patch('src.fixture_ingester.upsert_fixture')
+    @patch('src.fixture_ingester.fetch_fixtures_by_date')
+    @patch('src.fixture_ingester.get_connection')
+    @patch.object(EntityCache, 'load_from_db')
+    def test_successful_fixture_releases_its_savepoint(
+        self, mock_load_cache, mock_get_connection, mock_fetch_dates, mock_upsert, mock_sleep,
+    ):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = None
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+        mock_get_connection.return_value.__enter__.return_value = conn
+        mock_get_connection.return_value.__exit__.return_value = False
+
+        mock_fetch_dates.return_value = [self._make_api_fixture(333)]
+        mock_upsert.return_value = "new-fixture-uuid"
+
+        summary = run_ingestion(days_back=0, days_forward=0)
+
+        assert summary["errors"] == 0
+        assert summary["fixtures_inserted"] == 1
+
+        executed_sql = [c[0][0] for c in cursor.execute.call_args_list]
+        assert 'RELEASE SAVEPOINT fixture_sp' in executed_sql
+        assert 'ROLLBACK TO SAVEPOINT fixture_sp' not in executed_sql
+
+    @patch('src.fixture_ingester.time.sleep')
+    @patch('src.fixture_ingester.upsert_fixture')
+    @patch('src.fixture_ingester.fetch_fixtures_by_date')
+    @patch('src.fixture_ingester.get_connection')
+    @patch.object(EntityCache, 'load_from_db')
+    def test_upsert_returning_none_rolls_back_not_releases(
+        self, mock_load_cache, mock_get_connection, mock_fetch_dates, mock_upsert, mock_sleep,
+    ):
+        """upsert_fixture() swallows its own exceptions and returns None
+        instead of raising — the transaction may already be aborted in that
+        case, so this path must ROLLBACK TO SAVEPOINT, not RELEASE (which
+        would itself raise in an aborted transaction and crash the run)."""
+        cursor = MagicMock()
+        cursor.fetchone.return_value = None
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+        mock_get_connection.return_value.__enter__.return_value = conn
+        mock_get_connection.return_value.__exit__.return_value = False
+
+        mock_fetch_dates.return_value = [self._make_api_fixture(444)]
+        mock_upsert.return_value = None  # no exception, just a None result
+
+        summary = run_ingestion(days_back=0, days_forward=0)
+
+        assert summary["errors"] == 1
+        executed_sql = [c[0][0] for c in cursor.execute.call_args_list]
+        assert 'ROLLBACK TO SAVEPOINT fixture_sp' in executed_sql
+        assert 'RELEASE SAVEPOINT fixture_sp' not in executed_sql

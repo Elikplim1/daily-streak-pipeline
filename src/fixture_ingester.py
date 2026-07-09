@@ -495,7 +495,16 @@ def run_ingestion(days_back: int = 1, days_forward: int = 7) -> dict:
                 continue
 
             for api_fixture in fixtures:
+                # Each fixture gets its own SAVEPOINT so a single failure
+                # (bad upsert, stats insert, etc.) can't poison the whole
+                # per-date transaction and abort every fixture after it with
+                # "current transaction is aborted, commands ignored until
+                # end of transaction block." Everything this fixture touches
+                # — the existed-check, the upsert, and stats ingestion — must
+                # be inside the savepoint's scope for the isolation to hold.
                 try:
+                    cursor.execute("SAVEPOINT fixture_sp")
+
                     source_id = str(api_fixture["fixture"]["id"])
                     cursor.execute(
                         "SELECT id FROM fixtures WHERE source_match_id = %s",
@@ -522,10 +531,20 @@ def run_ingestion(days_back: int = 1, days_forward: int = 7) -> dict:
                                 cursor, result, source_id, cache, home_api_id
                             ):
                                 summary["stats_ingested"] += 1
+
+                        cursor.execute("RELEASE SAVEPOINT fixture_sp")
                     else:
+                        # upsert_fixture() catches its own exceptions and
+                        # returns None rather than raising — if the INSERT
+                        # itself failed, the transaction may already be
+                        # aborted, so roll back to the savepoint (safe even
+                        # if nothing actually failed) instead of RELEASE,
+                        # which would itself raise in an aborted transaction.
+                        cursor.execute("ROLLBACK TO SAVEPOINT fixture_sp")
                         summary["errors"] += 1
 
                 except Exception as e:
+                    cursor.execute("ROLLBACK TO SAVEPOINT fixture_sp")
                     summary["errors"] += 1
                     logger.error(f"Error processing fixture: {e}")
 
