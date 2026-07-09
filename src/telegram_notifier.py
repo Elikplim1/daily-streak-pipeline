@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Tuple
 import requests
 
 from src.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SHADOW_MODE
-from src.market_presets import CORE_MARKETS
+from src.market_presets import CORE_MARKETS, MatchType
 
 logger = logging.getLogger(__name__)
 
@@ -110,11 +110,20 @@ def build_high_signal_message(
             ao = mdata['away_overall']
 
             market_name = escape_markdown_v2(market.name)
-            match_type = escape_markdown_v2(market.match_type)
+
+            is_cross = market.match_type == MatchType.CROSS_COMPLEMENTARY
+            cross_def = mdata.get('cross_defensive')
+            cross_off = mdata.get('cross_offensive')
+            is_cross_validated = is_cross and cross_def and cross_off
+
+            if is_cross_validated:
+                tag = escape_markdown_v2("CROSS-VALIDATED ✅")
+            else:
+                tag = escape_markdown_v2(market.match_type)
 
             lines += [
                 "",
-                f"  📊 {market_name} \\({match_type}\\)",
+                f"  📊 {market_name} \\({tag}\\)",
                 (
                     f"  🏠 Home: {hv.streak_length}v/{ho.streak_length}o "
                     f"\\(Venue\\) \\| {hv.trend_count}/{ho.trend_count} \\(Overall\\)"
@@ -124,6 +133,18 @@ def build_high_signal_message(
                     f"\\(Venue\\) \\| {av.trend_count}/{ao.trend_count} \\(Overall\\)"
                 ),
             ]
+
+            if is_cross_validated:
+                lines += [
+                    (
+                        f"    🛡️ Defensive: concedes under in "
+                        f"{cross_def.streak_length}/{cross_def.window_size} home matches"
+                    ),
+                    (
+                        f"    ⚔️ Offensive: scores under in "
+                        f"{cross_off.streak_length}/{cross_off.window_size} away matches"
+                    ),
+                ]
 
         lines.append("━━━━━━━━━━━━━━━━━━━━━")
 

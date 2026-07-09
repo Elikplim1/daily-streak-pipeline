@@ -87,7 +87,7 @@ SUPPORTING_EVIDENCE_ONLY: list[str] = [
     "no_away_2plus",
 ]
 
-# All 39 markets scanned by the pipeline (11 original + 28 added in Session 5A)
+# All 59 markets scanned by the pipeline (11 original + 28 in Session 5A + 20 in Session 5B)
 SCAN_MARKETS: list[str] = [
     # === EXISTING 11 ===
     "ft_win", "ht_win",
@@ -111,6 +111,20 @@ SCAN_MARKETS: list[str] = [
     "ms_draw",
     # === EVENT-BASED (Session 5A) ===
     "no_goal_5min", "no_goal_10min",
+    # === CORNERS — TOTAL (Session 5B) ===
+    "over_8_5_corners", "under_8_5_corners",
+    "over_9_5_corners", "under_9_5_corners",
+    "over_10_5_corners", "under_10_5_corners",
+    "over_11_5_corners", "under_11_5_corners",
+    # === CORNERS — TEAM (Session 5B) ===
+    "over_3_5_team_corners", "under_3_5_team_corners",
+    "over_4_5_team_corners", "under_4_5_team_corners",
+    "over_5_5_team_corners", "under_5_5_team_corners",
+    # === CARDS — TOTAL (Session 5B) ===
+    "over_2_5_cards", "under_2_5_cards",
+    "over_3_5_cards", "under_3_5_cards",
+    # === CARDS — TEAM (Session 5B) ===
+    "over_1_5_team_cards", "under_1_5_team_cards",
 ]
 
 # Legacy alias kept for backwards compatibility

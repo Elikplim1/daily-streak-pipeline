@@ -48,12 +48,20 @@ def check_alignment(
     away_venue: StreakResult,
     away_overall: StreakResult,
     match_type: str,
+    market_data: dict = None,
 ) -> bool:
     """
     Check if the alignment condition is met for a given market.
 
     Uses the BEST (highest) streak from either lens per team.
     Alignment requires both sides to meet HIGH_SIGNAL_MIN for most types.
+
+    CROSS_COMPLEMENTARY additionally requires the cross_defensive/cross_offensive
+    streaks (computed by streak_scanner.scan_fixture, passed via market_data) to
+    both meet MODERATE_SIGNAL_MIN — regular alignment confirms the total-goals
+    pattern, cross alignment confirms it's backed by matching offense/defense
+    records. Falls back to regular-only if cross data isn't present (e.g. the
+    market has no cross evaluators wired).
     """
     home_best = best_streak(home_venue, home_overall)
     away_best = best_streak(away_venue, away_overall)
@@ -63,6 +71,21 @@ def check_alignment(
 
     elif match_type == MatchType.FLEXIBLE_OR:
         return home_best >= HIGH_SIGNAL_MIN or away_best >= HIGH_SIGNAL_MIN
+
+    elif match_type == MatchType.CROSS_COMPLEMENTARY:
+        regular_aligned = home_best >= HIGH_SIGNAL_MIN and away_best >= HIGH_SIGNAL_MIN
+
+        cross_def = market_data.get('cross_defensive') if market_data else None
+        cross_off = market_data.get('cross_offensive') if market_data else None
+
+        if cross_def and cross_off:
+            cross_aligned = (
+                cross_def.streak_length >= MODERATE_SIGNAL_MIN
+                and cross_off.streak_length >= MODERATE_SIGNAL_MIN
+            )
+            return regular_aligned and cross_aligned
+        else:
+            return regular_aligned
 
     else:
         logger.warning(f"Unknown match_type: {match_type}")
@@ -94,6 +117,18 @@ def classify_signal_tier(
     # Supporting evidence markets never fire independently
     if market_key in SUPPORTING_EVIDENCE_ONLY:
         return 'TRACKING'
+
+    # Stats-based markets (corners, cards) need a minimum sample size — stats
+    # data is sparse (only ~4,000 fixtures have it), so a "streak" built on
+    # 1-2 matches isn't a reliable signal.
+    market = CORE_MARKETS.get(market_key)
+    if market and market.stats_based:
+        window_sizes = (
+            home_venue.window_size, home_overall.window_size,
+            away_venue.window_size, away_overall.window_size,
+        )
+        if min(window_sizes) < 3:
+            return 'TRACKING'
 
     home_best = best_streak(home_venue, home_overall)
     away_best = best_streak(away_venue, away_overall)
@@ -131,6 +166,7 @@ def apply_alignment(scan_results: List[FixtureScanResult]) -> List[FixtureScanRe
                 home_venue, home_overall,
                 away_venue, away_overall,
                 market.match_type,
+                market_data=market_data,
             )
             tier = classify_signal_tier(
                 home_venue, home_overall,

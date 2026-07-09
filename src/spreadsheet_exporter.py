@@ -51,7 +51,7 @@ def build_spreadsheet(
         logger.error("Cannot generate spreadsheet — openpyxl not installed")
         return None
 
-    from src.market_presets import CORE_MARKETS
+    from src.market_presets import CORE_MARKETS, MatchType
     from src.config import SUPPORTING_EVIDENCE_ONLY
 
     wb = Workbook()
@@ -65,6 +65,7 @@ def build_spreadsheet(
         "Home Venue Streak", "Home Overall", "Home Venue Trend", "Home Overall Trend",
         "Away Venue Streak", "Away Overall", "Away Venue Trend", "Away Overall Trend",
         "Match Type", "Streak Type",
+        "Cross Defensive Streak", "Cross Offensive Streak", "Cross Validated",
     ]
 
     for col_idx, header in enumerate(headers, 1):
@@ -99,6 +100,10 @@ def build_spreadsheet(
             date_only = fixture_date[:10] if fixture_date else ''
             time_only = fixture_date[11:16] if len(fixture_date) > 11 else ''
 
+            is_cross = market.match_type == MatchType.CROSS_COMPLEMENTARY
+            cross_def = mdata.get('cross_defensive')
+            cross_off = mdata.get('cross_offensive')
+
             row_data = [
                 date_only, time_only,
                 fr.league_name, fr.home_team_name, fr.away_team_name,
@@ -110,6 +115,9 @@ def build_spreadsheet(
                 av.streak_length, ao.streak_length,
                 av.trend_count, ao.trend_count,
                 market.match_type, market.streak_type,
+                cross_def.streak_length if cross_def else '',
+                cross_off.streak_length if cross_off else '',
+                ('YES' if mdata['alignment_met'] else 'NO') if (is_cross and cross_def and cross_off) else '',
             ]
 
             for col_idx, value in enumerate(row_data, 1):

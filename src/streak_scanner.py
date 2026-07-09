@@ -17,10 +17,10 @@ Supabase column names (confirmed via Step 0 schema discovery):
 """
 import logging
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple
+from typing import Callable, List, Dict, Optional, Tuple
 
 from src.db import get_cursor
-from src.market_presets import CORE_MARKETS, MarketPreset
+from src.market_presets import CORE_MARKETS, MarketPreset, MatchType
 from src.config import STREAK_WINDOW
 
 logger = logging.getLogger(__name__)
@@ -147,16 +147,75 @@ def get_team_recent_fixtures(
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
+def get_team_recent_stats(
+    team_id: str,
+    venue_filter: Optional[str],
+    limit: int,
+    cursor,
+    stat_column: str = 'corners',
+) -> List[dict]:
+    """
+    Query fixture_stats_football for a team's recent stats (Session 5B).
+    Returns fixture dicts augmented with 'home_stat'/'away_stat' columns.
+
+    Only returns fixtures that HAVE stats data for BOTH teams (inner join).
+    The uq_fixture_team_period (fixture_id, team_id, period) unique constraint
+    on fixture_stats_football guarantees at most one row per side, so this
+    join can't fan out into duplicate rows.
+    """
+    if venue_filter == 'home':
+        venue_clause = "f.home_team_id = %s"
+    elif venue_filter == 'away':
+        venue_clause = "f.away_team_id = %s"
+    else:
+        venue_clause = "(f.home_team_id = %s OR f.away_team_id = %s)"
+
+    query = f"""
+        SELECT f.id as fixture_id, f.home_team_id, f.away_team_id,
+               f.ft_home, f.ft_away, f.ht_home, f.ht_away,
+               f.kickoff_utc,
+               home_stats.{stat_column} as home_stat,
+               away_stats.{stat_column} as away_stat
+        FROM fixtures f
+        JOIN fixture_stats_football home_stats
+            ON f.id = home_stats.fixture_id
+            AND home_stats.team_id = f.home_team_id
+            AND home_stats.period = 'FT'
+        JOIN fixture_stats_football away_stats
+            ON f.id = away_stats.fixture_id
+            AND away_stats.team_id = f.away_team_id
+            AND away_stats.period = 'FT'
+        WHERE f.status IN ('FT', 'AET', 'PEN')
+          AND {venue_clause}
+          AND home_stats.{stat_column} IS NOT NULL
+          AND away_stats.{stat_column} IS NOT NULL
+        ORDER BY f.kickoff_utc DESC
+        LIMIT %s
+    """
+
+    if venue_filter in ('home', 'away'):
+        cursor.execute(query, (team_id, limit))
+    else:
+        cursor.execute(query, (team_id, team_id, limit))
+
+    columns = [desc[0] for desc in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
 def evaluate_team_market(
     fixtures: List[dict],
     market: MarketPreset,
     team_id: str,
+    override_evaluator: Optional[Callable[[dict], Optional[bool]]] = None,
 ) -> Tuple[int, int, List[Optional[bool]]]:
     """
     Evaluate a market condition across a list of fixtures for one team.
 
     Determines the team's role per fixture (home/away) from the fixture dict,
-    then calls the appropriate evaluate_home or evaluate_away function.
+    then calls the appropriate evaluate_home or evaluate_away function — or,
+    if override_evaluator is given, calls that instead of the market's own
+    evaluate_home/evaluate_away (used for CROSS_COMPLEMENTARY cross-streaks,
+    where the evaluator differs from the market's regular one).
 
     Returns:
         (streak_length, trend_count, evaluations_list)
@@ -164,11 +223,20 @@ def evaluate_team_market(
     evaluations = []
     for f in fixtures:
         if f['home_team_id'] == team_id:
-            result = market.evaluate_home(f)
+            role = 'home'
         elif f['away_team_id'] == team_id:
-            result = market.evaluate_away(f)
+            role = 'away'
         else:
-            result = None
+            evaluations.append(None)
+            continue
+
+        if override_evaluator:
+            result = override_evaluator(f)
+        elif role == 'home':
+            result = market.evaluate_home(f)
+        else:
+            result = market.evaluate_away(f)
+
         evaluations.append(result)
 
     streak, trend = calculate_streak_and_trend(evaluations)
@@ -267,6 +335,41 @@ def scan_fixture(fixture: dict, cursor) -> FixtureScanResult:
             a_overall_streak, a_overall_trend, a_overall_evals = evaluate_no_goal_market(
                 away_overall_fixtures, minutes, cursor
             )
+            h_venue_window, h_overall_window = len(home_home_fixtures), len(home_overall_fixtures)
+            a_venue_window, a_overall_window = len(away_away_fixtures), len(away_overall_fixtures)
+
+        elif market.stats_based:
+            # Stats-based markets (corners, cards) query fixture_stats_football
+            # instead of fixtures — separate data per lens, not the shared
+            # home_home_fixtures/etc. lists used by the other two branches.
+            home_home_stats = get_team_recent_stats(
+                home_id, 'home', STREAK_WINDOW, cursor, market.stats_column
+            )
+            home_overall_stats = get_team_recent_stats(
+                home_id, None, STREAK_WINDOW, cursor, market.stats_column
+            )
+            away_away_stats = get_team_recent_stats(
+                away_id, 'away', STREAK_WINDOW, cursor, market.stats_column
+            )
+            away_overall_stats = get_team_recent_stats(
+                away_id, None, STREAK_WINDOW, cursor, market.stats_column
+            )
+
+            h_venue_streak, h_venue_trend, h_venue_evals = evaluate_team_market(
+                home_home_stats, market, home_id
+            )
+            h_overall_streak, h_overall_trend, h_overall_evals = evaluate_team_market(
+                home_overall_stats, market, home_id
+            )
+            a_venue_streak, a_venue_trend, a_venue_evals = evaluate_team_market(
+                away_away_stats, market, away_id
+            )
+            a_overall_streak, a_overall_trend, a_overall_evals = evaluate_team_market(
+                away_overall_stats, market, away_id
+            )
+            h_venue_window, h_overall_window = len(home_home_stats), len(home_overall_stats)
+            a_venue_window, a_overall_window = len(away_away_stats), len(away_overall_stats)
+
         else:
             h_venue_streak, h_venue_trend, h_venue_evals = evaluate_team_market(
                 home_home_fixtures, market, home_id
@@ -280,32 +383,65 @@ def scan_fixture(fixture: dict, cursor) -> FixtureScanResult:
             a_overall_streak, a_overall_trend, a_overall_evals = evaluate_team_market(
                 away_overall_fixtures, market, away_id
             )
+            h_venue_window, h_overall_window = len(home_home_fixtures), len(home_overall_fixtures)
+            a_venue_window, a_overall_window = len(away_away_fixtures), len(away_overall_fixtures)
 
         result.market_results[mkey] = {
             'home_venue': StreakResult(
                 market_key=mkey, team_id=str(home_id), venue_lens='home_only',
                 streak_length=h_venue_streak, trend_count=h_venue_trend,
-                window_size=len(home_home_fixtures), matches_evaluated=h_venue_evals,
+                window_size=h_venue_window, matches_evaluated=h_venue_evals,
             ),
             'home_overall': StreakResult(
                 market_key=mkey, team_id=str(home_id), venue_lens='overall',
                 streak_length=h_overall_streak, trend_count=h_overall_trend,
-                window_size=len(home_overall_fixtures), matches_evaluated=h_overall_evals,
+                window_size=h_overall_window, matches_evaluated=h_overall_evals,
             ),
             'away_venue': StreakResult(
                 market_key=mkey, team_id=str(away_id), venue_lens='away_only',
                 streak_length=a_venue_streak, trend_count=a_venue_trend,
-                window_size=len(away_away_fixtures), matches_evaluated=a_venue_evals,
+                window_size=a_venue_window, matches_evaluated=a_venue_evals,
             ),
             'away_overall': StreakResult(
                 market_key=mkey, team_id=str(away_id), venue_lens='overall',
                 streak_length=a_overall_streak, trend_count=a_overall_trend,
-                window_size=len(away_overall_fixtures), matches_evaluated=a_overall_evals,
+                window_size=a_overall_window, matches_evaluated=a_overall_evals,
             ),
             # Placeholders — filled by correlation_checker
             'signal_tier': 'TRACKING',
             'alignment_met': False,
         }
+
+        # Session 5B: cross-streak calculation for CROSS_COMPLEMENTARY markets.
+        # Reuses the already-fetched home_home_fixtures/away_away_fixtures —
+        # no extra queries. Only markets with both cross evaluators set
+        # (currently the 4 goals markets) get this; corners/cards don't.
+        if (
+            market.match_type == MatchType.CROSS_COMPLEMENTARY
+            and market.evaluate_cross_defensive_home
+            and market.evaluate_cross_offensive_away
+        ):
+            # Home team DEFENSIVE streak (how often they don't concede X at home)
+            cross_def_streak, cross_def_trend, _ = evaluate_team_market(
+                home_home_fixtures, market, home_id,
+                override_evaluator=market.evaluate_cross_defensive_home,
+            )
+            # Away team OFFENSIVE streak (how often they don't score X away)
+            cross_off_streak, cross_off_trend, _ = evaluate_team_market(
+                away_away_fixtures, market, away_id,
+                override_evaluator=market.evaluate_cross_offensive_away,
+            )
+
+            result.market_results[mkey]['cross_defensive'] = StreakResult(
+                market_key=mkey, team_id=str(home_id), venue_lens='cross_defensive',
+                streak_length=cross_def_streak, trend_count=cross_def_trend,
+                window_size=len(home_home_fixtures),
+            )
+            result.market_results[mkey]['cross_offensive'] = StreakResult(
+                market_key=mkey, team_id=str(away_id), venue_lens='cross_offensive',
+                streak_length=cross_off_streak, trend_count=cross_off_trend,
+                window_size=len(away_away_fixtures),
+            )
 
     return result
 

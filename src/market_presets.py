@@ -15,6 +15,7 @@ fixture_row is a dict with keys matching the Supabase fixtures table columns
   home_team_id, away_team_id
 """
 from dataclasses import dataclass
+from functools import partial
 from typing import Callable, Dict, Optional
 
 
@@ -24,6 +25,7 @@ class MatchType:
     SAME_PATTERN = "SAME_PATTERN"
     COMBINED = "COMBINED"
     FLEXIBLE_OR = "FLEXIBLE_OR"
+    CROSS_COMPLEMENTARY = "CROSS_COMPLEMENTARY"  # Offensive vs defensive cross-check
 
 
 class StreakType:
@@ -44,6 +46,14 @@ class MarketPreset:
     evaluate_home: Callable[[dict], Optional[bool]]
     evaluate_away: Callable[[dict], Optional[bool]]
     description: str = ""
+    # Cross-complementary fields (optional — only for CROSS_COMPLEMENTARY markets)
+    evaluate_cross_defensive_home: Optional[Callable[[dict], Optional[bool]]] = None
+    evaluate_cross_offensive_away: Optional[Callable[[dict], Optional[bool]]] = None
+    # For stats-based markets (queried from fixture_stats_football, not fixtures)
+    stats_based: bool = False
+    stats_column: str = ""  # Column name in fixture_stats_football
+    stats_threshold: float = 0
+    stats_over: bool = True  # True = over, False = under
 
 
 # === EVALUATION HELPERS ===
@@ -452,6 +462,114 @@ def eval_ms_draw_away(f: dict) -> Optional[bool]:
     return eval_ms_draw_home(f)
 
 
+# === SESSION 5B: CROSS-COMPLEMENTARY EVALUATION FUNCTIONS ===
+# These evaluate the DEFENSIVE side (goals conceded) or OFFENSIVE side (goals scored)
+# separately, unlike the regular evaluators which check total goals.
+#
+# For a fixture where TeamA is the team being evaluated:
+# - If TeamA was HOME: ft_home = their goals, ft_away = goals they conceded
+# - If TeamA was AWAY: ft_away = their goals, ft_home = goals they conceded
+
+def eval_cross_concedes_under_2_home(f: dict) -> Optional[bool]:
+    """Home team conceded fewer than 2 goals (defensive strength)."""
+    if not _scores_available(f): return None
+    return f['ft_away'] < 2  # Goals scored BY opponent = goals conceded BY home team
+
+def eval_cross_concedes_under_2_away(f: dict) -> Optional[bool]:
+    """Away team conceded fewer than 2 goals."""
+    if not _scores_available(f): return None
+    return f['ft_home'] < 2  # Goals scored BY opponent = goals conceded BY away team
+
+def eval_cross_scores_under_2_home(f: dict) -> Optional[bool]:
+    """Home team scored fewer than 2 goals (offensive weakness)."""
+    if not _scores_available(f): return None
+    return f['ft_home'] < 2
+
+def eval_cross_scores_under_2_away(f: dict) -> Optional[bool]:
+    """Away team scored fewer than 2 goals."""
+    if not _scores_available(f): return None
+    return f['ft_away'] < 2
+
+def eval_cross_concedes_under_3_home(f: dict) -> Optional[bool]:
+    if not _scores_available(f): return None
+    return f['ft_away'] < 3
+
+def eval_cross_concedes_under_3_away(f: dict) -> Optional[bool]:
+    if not _scores_available(f): return None
+    return f['ft_home'] < 3
+
+def eval_cross_scores_under_3_home(f: dict) -> Optional[bool]:
+    if not _scores_available(f): return None
+    return f['ft_home'] < 3
+
+def eval_cross_scores_under_3_away(f: dict) -> Optional[bool]:
+    if not _scores_available(f): return None
+    return f['ft_away'] < 3
+
+# Over versions: check if teams SCORE/CONCEDE 2+
+def eval_cross_concedes_over_2_home(f: dict) -> Optional[bool]:
+    if not _scores_available(f): return None
+    return f['ft_away'] >= 2
+
+def eval_cross_scores_over_2_home(f: dict) -> Optional[bool]:
+    if not _scores_available(f): return None
+    return f['ft_home'] >= 2
+
+def eval_cross_concedes_over_2_away(f: dict) -> Optional[bool]:
+    if not _scores_available(f): return None
+    return f['ft_home'] >= 2
+
+def eval_cross_scores_over_2_away(f: dict) -> Optional[bool]:
+    if not _scores_available(f): return None
+    return f['ft_away'] >= 2
+
+
+# === SESSION 5B: STATS-BASED MARKET EVALUATORS (corners, yellow cards) ===
+# These read 'home_stat'/'away_stat' keys populated by
+# streak_scanner.get_team_recent_stats() — NOT ft_home/ft_away.
+# Bound to a specific line via functools.partial(threshold=...) at registration.
+#
+# NOTE: for "Under X.5" the comparison is `< threshold` directly (threshold
+# is already the .5 line, e.g. 8.5) — NOT `< threshold + 1`, which would
+# incorrectly shift the line up by one whole goal/corner/card and let e.g.
+# a total of 9 pass an "Under 8.5" check.
+
+def eval_over_corners_total(f: dict, threshold: float) -> Optional[bool]:
+    """Total match corners > threshold."""
+    h = f.get('home_stat')
+    a = f.get('away_stat')
+    if h is None or a is None: return None
+    return (h + a) > threshold
+
+def eval_under_corners_total(f: dict, threshold: float) -> Optional[bool]:
+    """Total match corners < threshold (e.g. Under 8.5 means total <= 8)."""
+    h = f.get('home_stat')
+    a = f.get('away_stat')
+    if h is None or a is None: return None
+    return (h + a) < threshold
+
+def eval_over_team_stat_home(f: dict, threshold: float) -> Optional[bool]:
+    """Home team's stat > threshold."""
+    h = f.get('home_stat')
+    if h is None: return None
+    return h > threshold
+
+def eval_over_team_stat_away(f: dict, threshold: float) -> Optional[bool]:
+    a = f.get('away_stat')
+    if a is None: return None
+    return a > threshold
+
+def eval_under_team_stat_home(f: dict, threshold: float) -> Optional[bool]:
+    h = f.get('home_stat')
+    if h is None: return None
+    return h < threshold
+
+def eval_under_team_stat_away(f: dict, threshold: float) -> Optional[bool]:
+    a = f.get('away_stat')
+    if a is None: return None
+    return a < threshold
+
+
 # === CORE MARKET REGISTRY ===
 
 CORE_MARKETS: Dict[str, MarketPreset] = {
@@ -499,15 +617,19 @@ CORE_MARKETS: Dict[str, MarketPreset] = {
     ),
     "over_2_5": MarketPreset(
         key="over_2_5", name="Over 2.5 Goals",
-        match_type=MatchType.COMBINED, streak_type=StreakType.OCCURRENCE,
+        match_type=MatchType.CROSS_COMPLEMENTARY, streak_type=StreakType.OCCURRENCE,
         evaluate_home=eval_over25_home, evaluate_away=eval_over25_away,
-        description="3+ total goals. COMBINED: both teams' matches individually show this.",
+        evaluate_cross_defensive_home=eval_cross_concedes_over_2_home,
+        evaluate_cross_offensive_away=eval_cross_scores_over_2_away,
+        description="3+ total goals. Cross-validated: home defense vs away offense.",
     ),
     "under_2_5": MarketPreset(
         key="under_2_5", name="Under 2.5 Goals",
-        match_type=MatchType.COMBINED, streak_type=StreakType.NON_OCCURRENCE,
+        match_type=MatchType.CROSS_COMPLEMENTARY, streak_type=StreakType.NON_OCCURRENCE,
         evaluate_home=eval_under25_home, evaluate_away=eval_under25_away,
-        description="Fewer than 3 total goals.",
+        evaluate_cross_defensive_home=eval_cross_concedes_under_3_home,
+        evaluate_cross_offensive_away=eval_cross_scores_under_3_away,
+        description="Fewer than 3 total goals. Cross-validated: home defense vs away offense.",
     ),
     "under_3_5": MarketPreset(
         key="under_3_5", name="Under 3.5 Goals",
@@ -524,13 +646,17 @@ CORE_MARKETS: Dict[str, MarketPreset] = {
     # === SESSION 5A ADDITIONS (28 new markets) ===
     "over_1_5": MarketPreset(
         key="over_1_5", name="Over 1.5 Goals",
-        match_type=MatchType.COMBINED, streak_type=StreakType.OCCURRENCE,
+        match_type=MatchType.CROSS_COMPLEMENTARY, streak_type=StreakType.OCCURRENCE,
         evaluate_home=eval_over15_home, evaluate_away=eval_over15_away,
+        evaluate_cross_defensive_home=eval_cross_concedes_over_2_home,
+        evaluate_cross_offensive_away=eval_cross_scores_over_2_away,
     ),
     "under_1_5": MarketPreset(
         key="under_1_5", name="Under 1.5 Goals",
-        match_type=MatchType.COMBINED, streak_type=StreakType.NON_OCCURRENCE,
+        match_type=MatchType.CROSS_COMPLEMENTARY, streak_type=StreakType.NON_OCCURRENCE,
         evaluate_home=eval_under15_home, evaluate_away=eval_under15_away,
+        evaluate_cross_defensive_home=eval_cross_concedes_under_2_home,
+        evaluate_cross_offensive_away=eval_cross_scores_under_2_away,
     ),
     "over_4_5": MarketPreset(
         key="over_4_5", name="Over 4.5 Goals",
@@ -666,6 +792,154 @@ CORE_MARKETS: Dict[str, MarketPreset] = {
         match_type=MatchType.COMBINED, streak_type=StreakType.NON_OCCURRENCE,
         evaluate_home=None,
         evaluate_away=None,
+    ),
+    # === SESSION 5B: STATS-BASED MARKETS (corners, yellow cards) ===
+    # match_type=COMBINED (not CROSS_COMPLEMENTARY): no cross defensive/offensive
+    # evaluators exist for corners/cards, so tagging them CROSS_COMPLEMENTARY
+    # would silently behave identically to COMBINED but display a misleading
+    # match type in the spreadsheet/Telegram output.
+    "over_8_5_corners": MarketPreset(
+        key="over_8_5_corners", name="Over 8.5 Total Corners",
+        match_type=MatchType.COMBINED, streak_type=StreakType.OCCURRENCE,
+        evaluate_home=partial(eval_over_corners_total, threshold=8.5),
+        evaluate_away=partial(eval_over_corners_total, threshold=8.5),
+        stats_based=True, stats_column="corners", stats_threshold=8.5, stats_over=True,
+    ),
+    "under_8_5_corners": MarketPreset(
+        key="under_8_5_corners", name="Under 8.5 Total Corners",
+        match_type=MatchType.COMBINED, streak_type=StreakType.NON_OCCURRENCE,
+        evaluate_home=partial(eval_under_corners_total, threshold=8.5),
+        evaluate_away=partial(eval_under_corners_total, threshold=8.5),
+        stats_based=True, stats_column="corners", stats_threshold=8.5, stats_over=False,
+    ),
+    "over_9_5_corners": MarketPreset(
+        key="over_9_5_corners", name="Over 9.5 Total Corners",
+        match_type=MatchType.COMBINED, streak_type=StreakType.OCCURRENCE,
+        evaluate_home=partial(eval_over_corners_total, threshold=9.5),
+        evaluate_away=partial(eval_over_corners_total, threshold=9.5),
+        stats_based=True, stats_column="corners", stats_threshold=9.5, stats_over=True,
+    ),
+    "under_9_5_corners": MarketPreset(
+        key="under_9_5_corners", name="Under 9.5 Total Corners",
+        match_type=MatchType.COMBINED, streak_type=StreakType.NON_OCCURRENCE,
+        evaluate_home=partial(eval_under_corners_total, threshold=9.5),
+        evaluate_away=partial(eval_under_corners_total, threshold=9.5),
+        stats_based=True, stats_column="corners", stats_threshold=9.5, stats_over=False,
+    ),
+    "over_10_5_corners": MarketPreset(
+        key="over_10_5_corners", name="Over 10.5 Total Corners",
+        match_type=MatchType.COMBINED, streak_type=StreakType.OCCURRENCE,
+        evaluate_home=partial(eval_over_corners_total, threshold=10.5),
+        evaluate_away=partial(eval_over_corners_total, threshold=10.5),
+        stats_based=True, stats_column="corners", stats_threshold=10.5, stats_over=True,
+    ),
+    "under_10_5_corners": MarketPreset(
+        key="under_10_5_corners", name="Under 10.5 Total Corners",
+        match_type=MatchType.COMBINED, streak_type=StreakType.NON_OCCURRENCE,
+        evaluate_home=partial(eval_under_corners_total, threshold=10.5),
+        evaluate_away=partial(eval_under_corners_total, threshold=10.5),
+        stats_based=True, stats_column="corners", stats_threshold=10.5, stats_over=False,
+    ),
+    "over_11_5_corners": MarketPreset(
+        key="over_11_5_corners", name="Over 11.5 Total Corners",
+        match_type=MatchType.COMBINED, streak_type=StreakType.OCCURRENCE,
+        evaluate_home=partial(eval_over_corners_total, threshold=11.5),
+        evaluate_away=partial(eval_over_corners_total, threshold=11.5),
+        stats_based=True, stats_column="corners", stats_threshold=11.5, stats_over=True,
+    ),
+    "under_11_5_corners": MarketPreset(
+        key="under_11_5_corners", name="Under 11.5 Total Corners",
+        match_type=MatchType.COMBINED, streak_type=StreakType.NON_OCCURRENCE,
+        evaluate_home=partial(eval_under_corners_total, threshold=11.5),
+        evaluate_away=partial(eval_under_corners_total, threshold=11.5),
+        stats_based=True, stats_column="corners", stats_threshold=11.5, stats_over=False,
+    ),
+    # Team corners
+    "over_3_5_team_corners": MarketPreset(
+        key="over_3_5_team_corners", name="Over 3.5 Team Corners",
+        match_type=MatchType.COMBINED, streak_type=StreakType.OCCURRENCE,
+        evaluate_home=partial(eval_over_team_stat_home, threshold=3.5),
+        evaluate_away=partial(eval_over_team_stat_away, threshold=3.5),
+        stats_based=True, stats_column="corners", stats_threshold=3.5, stats_over=True,
+    ),
+    "under_3_5_team_corners": MarketPreset(
+        key="under_3_5_team_corners", name="Under 3.5 Team Corners",
+        match_type=MatchType.COMBINED, streak_type=StreakType.NON_OCCURRENCE,
+        evaluate_home=partial(eval_under_team_stat_home, threshold=3.5),
+        evaluate_away=partial(eval_under_team_stat_away, threshold=3.5),
+        stats_based=True, stats_column="corners", stats_threshold=3.5, stats_over=False,
+    ),
+    "over_4_5_team_corners": MarketPreset(
+        key="over_4_5_team_corners", name="Over 4.5 Team Corners",
+        match_type=MatchType.COMBINED, streak_type=StreakType.OCCURRENCE,
+        evaluate_home=partial(eval_over_team_stat_home, threshold=4.5),
+        evaluate_away=partial(eval_over_team_stat_away, threshold=4.5),
+        stats_based=True, stats_column="corners", stats_threshold=4.5, stats_over=True,
+    ),
+    "under_4_5_team_corners": MarketPreset(
+        key="under_4_5_team_corners", name="Under 4.5 Team Corners",
+        match_type=MatchType.COMBINED, streak_type=StreakType.NON_OCCURRENCE,
+        evaluate_home=partial(eval_under_team_stat_home, threshold=4.5),
+        evaluate_away=partial(eval_under_team_stat_away, threshold=4.5),
+        stats_based=True, stats_column="corners", stats_threshold=4.5, stats_over=False,
+    ),
+    "over_5_5_team_corners": MarketPreset(
+        key="over_5_5_team_corners", name="Over 5.5 Team Corners",
+        match_type=MatchType.COMBINED, streak_type=StreakType.OCCURRENCE,
+        evaluate_home=partial(eval_over_team_stat_home, threshold=5.5),
+        evaluate_away=partial(eval_over_team_stat_away, threshold=5.5),
+        stats_based=True, stats_column="corners", stats_threshold=5.5, stats_over=True,
+    ),
+    "under_5_5_team_corners": MarketPreset(
+        key="under_5_5_team_corners", name="Under 5.5 Team Corners",
+        match_type=MatchType.COMBINED, streak_type=StreakType.NON_OCCURRENCE,
+        evaluate_home=partial(eval_under_team_stat_home, threshold=5.5),
+        evaluate_away=partial(eval_under_team_stat_away, threshold=5.5),
+        stats_based=True, stats_column="corners", stats_threshold=5.5, stats_over=False,
+    ),
+    # === STATS-BASED: YELLOW CARDS ===
+    "over_2_5_cards": MarketPreset(
+        key="over_2_5_cards", name="Over 2.5 Total Cards",
+        match_type=MatchType.COMBINED, streak_type=StreakType.OCCURRENCE,
+        evaluate_home=partial(eval_over_corners_total, threshold=2.5),
+        evaluate_away=partial(eval_over_corners_total, threshold=2.5),
+        stats_based=True, stats_column="yellow_cards", stats_threshold=2.5, stats_over=True,
+    ),
+    "under_2_5_cards": MarketPreset(
+        key="under_2_5_cards", name="Under 2.5 Total Cards",
+        match_type=MatchType.COMBINED, streak_type=StreakType.NON_OCCURRENCE,
+        evaluate_home=partial(eval_under_corners_total, threshold=2.5),
+        evaluate_away=partial(eval_under_corners_total, threshold=2.5),
+        stats_based=True, stats_column="yellow_cards", stats_threshold=2.5, stats_over=False,
+    ),
+    "over_3_5_cards": MarketPreset(
+        key="over_3_5_cards", name="Over 3.5 Total Cards",
+        match_type=MatchType.COMBINED, streak_type=StreakType.OCCURRENCE,
+        evaluate_home=partial(eval_over_corners_total, threshold=3.5),
+        evaluate_away=partial(eval_over_corners_total, threshold=3.5),
+        stats_based=True, stats_column="yellow_cards", stats_threshold=3.5, stats_over=True,
+    ),
+    "under_3_5_cards": MarketPreset(
+        key="under_3_5_cards", name="Under 3.5 Total Cards",
+        match_type=MatchType.COMBINED, streak_type=StreakType.NON_OCCURRENCE,
+        evaluate_home=partial(eval_under_corners_total, threshold=3.5),
+        evaluate_away=partial(eval_under_corners_total, threshold=3.5),
+        stats_based=True, stats_column="yellow_cards", stats_threshold=3.5, stats_over=False,
+    ),
+    # Team cards
+    "over_1_5_team_cards": MarketPreset(
+        key="over_1_5_team_cards", name="Over 1.5 Team Cards",
+        match_type=MatchType.COMBINED, streak_type=StreakType.OCCURRENCE,
+        evaluate_home=partial(eval_over_team_stat_home, threshold=1.5),
+        evaluate_away=partial(eval_over_team_stat_away, threshold=1.5),
+        stats_based=True, stats_column="yellow_cards", stats_threshold=1.5, stats_over=True,
+    ),
+    "under_1_5_team_cards": MarketPreset(
+        key="under_1_5_team_cards", name="Under 1.5 Team Cards",
+        match_type=MatchType.COMBINED, streak_type=StreakType.NON_OCCURRENCE,
+        evaluate_home=partial(eval_under_team_stat_home, threshold=1.5),
+        evaluate_away=partial(eval_under_team_stat_away, threshold=1.5),
+        stats_based=True, stats_column="yellow_cards", stats_threshold=1.5, stats_over=False,
     ),
 }
 

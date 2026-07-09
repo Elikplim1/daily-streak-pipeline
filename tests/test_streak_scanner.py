@@ -11,6 +11,8 @@ from src.streak_scanner import (
     calculate_streak_and_trend,
     evaluate_no_goal_minutes,
     evaluate_no_goal_market,
+    evaluate_team_market,
+    get_team_recent_stats,
 )
 from src.market_presets import (
     eval_ft_win_home, eval_ft_win_away,
@@ -37,6 +39,7 @@ from src.market_presets import (
     eval_ms_home_comfort_home, eval_ms_away_comfort_home,
     eval_ms_high_home_home, eval_ms_high_away_home,
     eval_ms_draw_home,
+    CORE_MARKETS,
 )
 
 
@@ -539,3 +542,90 @@ class TestEventBasedNoGoalMarkets:
         assert evals == [True, False, True]
         assert streak == 1  # newest (True) breaks at index 1 (False)
         assert trend == 2
+
+
+class TestEvaluateTeamMarketOverride:
+    """evaluate_team_market's override_evaluator param (Session 5B), used for
+    CROSS_COMPLEMENTARY cross-streaks — must stay backward compatible with
+    the existing 3-arg call sites (no override)."""
+
+    def _make_fixture(self, home_id, away_id, ft_h, ft_a):
+        return {'home_team_id': home_id, 'away_team_id': away_id, 'ft_home': ft_h, 'ft_away': ft_a}
+
+    def test_no_override_uses_market_evaluate_home_away(self):
+        market = CORE_MARKETS['ft_win']
+        fixtures = [
+            self._make_fixture('team1', 'team2', 2, 0),  # team1 home, won
+            self._make_fixture('team3', 'team1', 1, 0),  # team1 away, lost
+        ]
+        streak, trend, evals = evaluate_team_market(fixtures, market, 'team1')
+        assert evals == [True, False]
+
+    def test_override_evaluator_bypasses_market_functions(self):
+        market = CORE_MARKETS['ft_win']
+        fixtures = [self._make_fixture('team1', 'team2', 0, 0)]
+        # ft_win would give False/None here; override forces True regardless.
+        override = lambda f: True
+        streak, trend, evals = evaluate_team_market(
+            fixtures, market, 'team1', override_evaluator=override
+        )
+        assert evals == [True]
+        assert streak == 1
+
+    def test_override_still_returns_none_for_unrelated_fixture(self):
+        market = CORE_MARKETS['ft_win']
+        fixtures = [self._make_fixture('other1', 'other2', 1, 0)]
+        override = lambda f: True
+        _, _, evals = evaluate_team_market(
+            fixtures, market, 'team1', override_evaluator=override
+        )
+        assert evals == [None]
+
+
+class TestGetTeamRecentStats:
+    """get_team_recent_stats query shape — mocked cursor, no live DB."""
+
+    def test_home_venue_filter_query_params(self):
+        cursor = MagicMock()
+        cursor.description = [
+            ('fixture_id',), ('home_team_id',), ('away_team_id',),
+            ('ft_home',), ('ft_away',), ('ht_home',), ('ht_away',),
+            ('kickoff_utc',), ('home_stat',), ('away_stat',),
+        ]
+        cursor.fetchall.return_value = []
+
+        get_team_recent_stats('team-uuid', 'home', 5, cursor, 'corners')
+
+        sql, params = cursor.execute.call_args[0]
+        assert params == ('team-uuid', 5)
+        assert 'home_stats.corners' in sql
+        assert 'away_stats.corners' in sql
+        assert "f.home_team_id = %s" in sql
+
+    def test_overall_venue_filter_uses_two_team_id_params(self):
+        cursor = MagicMock()
+        cursor.description = [('fixture_id',)]
+        cursor.fetchall.return_value = []
+
+        get_team_recent_stats('team-uuid', None, 5, cursor, 'yellow_cards')
+
+        sql, params = cursor.execute.call_args[0]
+        assert params == ('team-uuid', 'team-uuid', 5)
+        assert 'yellow_cards' in sql
+
+    def test_returns_dicts_with_stat_columns(self):
+        cursor = MagicMock()
+        cursor.description = [
+            ('fixture_id',), ('home_team_id',), ('away_team_id',),
+            ('ft_home',), ('ft_away',), ('ht_home',), ('ht_away',),
+            ('kickoff_utc',), ('home_stat',), ('away_stat',),
+        ]
+        cursor.fetchall.return_value = [
+            ('fx1', 'h1', 'a1', 2, 1, 1, 0, '2026-01-01', 7, 5),
+        ]
+        rows = get_team_recent_stats('h1', 'home', 5, cursor, 'corners')
+        assert rows == [{
+            'fixture_id': 'fx1', 'home_team_id': 'h1', 'away_team_id': 'a1',
+            'ft_home': 2, 'ft_away': 1, 'ht_home': 1, 'ht_away': 0,
+            'kickoff_utc': '2026-01-01', 'home_stat': 7, 'away_stat': 5,
+        }]
