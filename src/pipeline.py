@@ -82,7 +82,9 @@ def complete_pipeline_run(pipeline_run_id: str, **counts) -> None:
     default if omitted): fixtures_ingested_new, fixtures_ingested_updated,
     new_leagues, new_teams, fixtures_scanned, high_signal, moderate_signal,
     tracking, rows_written, write_errors, telegram_summary_sent,
-    telegram_alerts_sent, telegram_error, spreadsheet_sent.
+    telegram_alerts_sent, telegram_error, spreadsheet_sent,
+    results_stale_found, results_updated, results_voided,
+    signals_won, signals_lost, signals_void, signals_skipped.
     """
     columns = [
         'fixtures_ingested_new', 'fixtures_ingested_updated',
@@ -91,6 +93,8 @@ def complete_pipeline_run(pipeline_run_id: str, **counts) -> None:
         'rows_written', 'write_errors',
         'telegram_summary_sent', 'telegram_alerts_sent', 'telegram_error',
         'spreadsheet_sent',
+        'results_stale_found', 'results_updated', 'results_voided',
+        'signals_won', 'signals_lost', 'signals_void', 'signals_skipped',
     ]
     set_clause = ", ".join(f"{col} = %s" for col in columns)
     values = [counts.get(col) for col in columns]
@@ -256,6 +260,28 @@ def run_pipeline(days_ahead: int = None) -> None:
         else:
             logger.info("Phase 0: Fixture ingestion skipped (INGEST_ENABLED=false or no API key)")
 
+        # Phase 0.5: UPDATE RESULTS for stale fixtures + VALIDATE signal outcomes
+        update_summary = None
+        val_summary = None
+        if ingest_enabled and API_FOOTBALL_KEY:
+            logger.info("Phase 0.5: Updating results for completed fixtures...")
+            from src.results_updater import run_results_update
+            update_summary = run_results_update()
+            logger.info(
+                f"Results update: {update_summary['updated']} completed, "
+                f"{update_summary['voided']} voided"
+            )
+
+            logger.info("Phase 0.5b: Validating signal outcomes...")
+            from src.results_validator import validate_signals
+            val_summary = validate_signals(pipeline_run_id)
+            logger.info(
+                f"Validation: {val_summary['won']} WON, {val_summary['lost']} LOST, "
+                f"{val_summary['void']} VOID"
+            )
+        else:
+            logger.info("Phase 0.5: Results update/validation skipped (INGEST_ENABLED=false or no API key)")
+
         # Phase 1: EXTRACT + TRANSFORM (streak scan)
         logger.info("Phase 1: Scanning upcoming fixtures for streaks...")
         scan_results = scan_all_upcoming(days_ahead)
@@ -272,6 +298,13 @@ def run_pipeline(days_ahead: int = None) -> None:
                 rows_written=0, write_errors=0,
                 telegram_summary_sent=False, telegram_alerts_sent=False, telegram_error=None,
                 spreadsheet_sent=False,
+                results_stale_found=update_summary['stale_found'] if update_summary else 0,
+                results_updated=update_summary['updated'] if update_summary else 0,
+                results_voided=update_summary['voided'] if update_summary else 0,
+                signals_won=val_summary['won'] if val_summary else 0,
+                signals_lost=val_summary['lost'] if val_summary else 0,
+                signals_void=val_summary['void'] if val_summary else 0,
+                signals_skipped=val_summary['skipped'] if val_summary else 0,
             )
             return
 
@@ -308,7 +341,12 @@ def run_pipeline(days_ahead: int = None) -> None:
         logger.info(f"MODERATE_SIGNAL:   {len(moderate_signals)}")
         logger.info(f"Rows written:      {rows_written}")
 
-        from src.telegram_notifier import send_alerts
+        from src.telegram_notifier import send_alerts, format_accuracy_section
+        from src.results_validator import get_accuracy_report
+        with get_connection() as acc_conn:
+            accuracy_report = get_accuracy_report(acc_conn.cursor(), days=7)
+        accuracy_section = format_accuracy_section(accuracy_report)
+
         telegram_status = send_alerts(
             high_signals=high_signals,
             total_fixtures=len(scan_results),
@@ -317,6 +355,7 @@ def run_pipeline(days_ahead: int = None) -> None:
             tracking_count=tracking_count,
             rows_written=rows_written,
             pipeline_run_id=pipeline_run_id,
+            accuracy_section=accuracy_section,
         )
 
         # Step 5: SPREADSHEET EXPORT
@@ -349,6 +388,13 @@ def run_pipeline(days_ahead: int = None) -> None:
             telegram_alerts_sent=telegram_status['alerts_sent'],
             telegram_error=telegram_status['error'],
             spreadsheet_sent=spreadsheet_sent,
+            results_stale_found=update_summary['stale_found'] if update_summary else 0,
+            results_updated=update_summary['updated'] if update_summary else 0,
+            results_voided=update_summary['voided'] if update_summary else 0,
+            signals_won=val_summary['won'] if val_summary else 0,
+            signals_lost=val_summary['lost'] if val_summary else 0,
+            signals_void=val_summary['void'] if val_summary else 0,
+            signals_skipped=val_summary['skipped'] if val_summary else 0,
         )
 
         logger.info(f"=== Pipeline Run Complete: {pipeline_run_id} ===")

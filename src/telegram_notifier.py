@@ -157,6 +157,38 @@ def build_high_signal_message(
     return "\n".join(lines)
 
 
+def format_accuracy_section(report: dict) -> Optional[str]:
+    """
+    Format the 'Signal Accuracy (last N days)' block for the daily summary
+    from results_validator.get_accuracy_report()'s output.
+
+    Returns None if the report is empty (nothing validated in the window
+    yet) so the summary doesn't show an empty accuracy section.
+    """
+    if not report:
+        return None
+
+    from src.market_presets import CORE_MARKETS
+
+    lines = ["", "📈 Signal Accuracy (last 7 days):"]
+
+    total_won = 0
+    total_lost = 0
+    for mkey, stats in sorted(report.items(), key=lambda kv: -kv[1]['total']):
+        market = CORE_MARKETS.get(mkey)
+        name = market.name if market else mkey
+        lines.append(f"  {name}: {stats['won']}/{stats['total']} ({stats['accuracy']}%)")
+        total_won += stats['won']
+        total_lost += stats['lost']
+
+    overall_total = total_won + total_lost
+    if overall_total > 0:
+        overall_accuracy = round(total_won / overall_total * 100, 1)
+        lines.append(f"  Overall: {total_won}/{overall_total} ({overall_accuracy}%)")
+
+    return "\n".join(lines)
+
+
 def build_summary_message(
     total_fixtures: int,
     high_count: int,
@@ -164,6 +196,7 @@ def build_summary_message(
     tracking_count: int,
     rows_written: int,
     pipeline_run_id: str,
+    accuracy_section: Optional[str] = None,
 ) -> str:
     """
     Build the daily summary message in plain text.
@@ -185,6 +218,8 @@ def build_summary_message(
         lines.append("No high-confidence opportunities today.")
     if SHADOW_MODE:
         lines.append("(Shadow mode ON — alert details logged, not broadcast)")
+    if accuracy_section:
+        lines.append(accuracy_section)
     lines.append(f"Run: {pipeline_run_id}")
     return "\n".join(lines)
 
@@ -252,6 +287,7 @@ def send_alerts(
     tracking_count: int,
     rows_written: int,
     pipeline_run_id: str,
+    accuracy_section: Optional[str] = None,
 ) -> dict:
     """
     Main entry point: send Telegram alerts based on SHADOW_MODE.
@@ -274,6 +310,7 @@ def send_alerts(
     summary = build_summary_message(
         total_fixtures, high_count, moderate_count,
         tracking_count, rows_written, pipeline_run_id,
+        accuracy_section=accuracy_section,
     )
 
     summary_sent = False
