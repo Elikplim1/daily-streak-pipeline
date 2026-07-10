@@ -13,6 +13,9 @@ Schema notes (confirmed via Step 0):
 - teams: no source_team_id column; use alias_mapping (entity_type='team')
 - alias_mapping.uq_alias: UNIQUE (entity_type, alias_source, alias_value)
 - sh_home, sh_away: GENERATED ALWAYS — never in INSERT/UPDATE
+- leagues.stats_tier: NOT NULL, CHECK IN ('Full', 'Semi', 'Mini') — no DB
+  default. Auto-created leagues default to 'Mini' (most conservative
+  sample-gate tier) until manually reviewed/upgraded.
 """
 import logging
 import time
@@ -159,8 +162,8 @@ def ensure_league(cursor, cache: EntityCache, api_league: dict) -> str:
 
     new_id = str(uuid.uuid4())
     cursor.execute("""
-        INSERT INTO leagues (id, name, country, sport, is_active)
-        VALUES (%s, %s, %s, 'football', true)
+        INSERT INTO leagues (id, name, country, sport, is_active, stats_tier)
+        VALUES (%s, %s, %s, 'football', true, 'Mini')
     """, (
         new_id,
         api_league.get("name", f"League {source_id}"),

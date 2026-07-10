@@ -5,7 +5,7 @@ without hitting the API or Supabase.
 from unittest.mock import MagicMock, patch
 
 import pytest
-from src.fixture_ingester import EntityCache, _parse_stat, maybe_ingest_stats, run_ingestion
+from src.fixture_ingester import EntityCache, _parse_stat, maybe_ingest_stats, run_ingestion, ensure_league
 
 
 class TestEntityCache:
@@ -373,3 +373,60 @@ class TestRunIngestionSavepointIsolation:
         executed_sql = [c[0][0] for c in cursor.execute.call_args_list]
         assert 'ROLLBACK TO SAVEPOINT fixture_sp' in executed_sql
         assert 'RELEASE SAVEPOINT fixture_sp' not in executed_sql
+
+
+class TestEnsureLeagueInsertsAllNotNullColumns:
+    """Regression guard: leagues.stats_tier is NOT NULL with no DB default,
+    so creating a new league without it fails the INSERT entirely."""
+
+    def _cache_miss_cursor(self):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = None  # not in alias_mapping -> INSERT path
+        return cursor
+
+    def test_new_league_insert_includes_stats_tier(self):
+        cursor = self._cache_miss_cursor()
+        cache = EntityCache()
+        api_league = {"id": 39, "name": "Premier League", "country": "England", "season": 2026}
+
+        ensure_league(cursor, cache, api_league)
+
+        insert_calls = [
+            c for c in cursor.execute.call_args_list
+            if 'INSERT INTO leagues' in c[0][0]
+        ]
+        assert len(insert_calls) == 1
+        sql = insert_calls[0][0][0]
+        assert 'stats_tier' in sql
+        # Must be a value the leagues_stats_tier_check CHECK constraint
+        # actually allows ('Full', 'Semi', 'Mini') — 'unranked' would pass
+        # the NOT NULL fix but still fail the CHECK constraint.
+        assert 'Mini' in sql
+
+    def test_new_league_insert_covers_all_not_null_columns(self):
+        """leagues NOT NULL columns without a DB default: id, name, country,
+        sport, stats_tier. is_active is NOT NULL but the INSERT already
+        supplies it explicitly (true)."""
+        cursor = self._cache_miss_cursor()
+        cache = EntityCache()
+        api_league = {"id": 40, "name": "Championship", "country": "England", "season": 2026}
+
+        ensure_league(cursor, cache, api_league)
+
+        insert_calls = [
+            c for c in cursor.execute.call_args_list
+            if 'INSERT INTO leagues' in c[0][0]
+        ]
+        sql = insert_calls[0][0][0]
+        for required_column in ('id', 'name', 'country', 'sport', 'is_active', 'stats_tier'):
+            assert required_column in sql, f"{required_column} missing from leagues INSERT"
+
+    def test_cached_league_skips_insert(self):
+        cursor = MagicMock()
+        cache = EntityCache()
+        cache.leagues[39] = 'existing-uuid'
+
+        result = ensure_league(cursor, cache, {"id": 39, "name": "Premier League", "country": "England"})
+
+        assert result == 'existing-uuid'
+        cursor.execute.assert_not_called()
