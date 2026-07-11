@@ -7,14 +7,15 @@ Finds fixtures in Supabase where:
     that it can't still be in play — a fresh kickoff might still be live)
   - source_match_id IS NOT NULL (can query API)
 
-Queries API-Football for the actual result. Only fixtures whose reported
-status is genuinely terminal get written back — the fixtures.status column
-has a CHECK constraint (NS, LIVE, HT, FT, AET, PEN, PST, CANC, ABD, AWD)
-that does NOT permit '1H', '2H', 'ET', 'P', 'BT', 'WO', 'SUSP', or 'INT',
-so any in-play or not-yet-legal status is left alone (counted as
-still_pending) rather than attempted — writing one of those would violate
-the constraint. Runs BEFORE the Results Validator in the pipeline
-(Phase 0.5).
+Queries API-Football for the actual result. The raw status is passed
+through STATUS_MAP (shared with fixture_ingester.py) before any decision
+is made — that maps every status API-Football can return onto a value the
+fixtures.status CHECK constraint actually permits (NS, LIVE, HT, FT, AET,
+PEN, PST, CANC, ABD, AWD), folding SUSP/INT into PST and WO into AWD.
+Only fixtures whose MAPPED status is genuinely terminal (FT, AET, PEN,
+PST, CANC, ABD, AWD) get written back; in-play statuses (which map to
+LIVE) are left alone and counted as still_pending rather than attempted.
+Runs BEFORE the Results Validator in the pipeline (Phase 0.5).
 
 API cost: 1 call per fixture. Capped per run via RESULTS_UPDATE_LIMIT (env,
 default 200) — fixture_ingester has only ever looked back 1 day, so the
@@ -30,6 +31,7 @@ from typing import List
 
 from src.config import API_FOOTBALL_KEY
 from src.db import get_connection
+from src.fixture_ingester import STATUS_MAP
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +40,8 @@ HEADERS = {"x-apisports-key": API_FOOTBALL_KEY}
 
 # Statuses treated as "voided" — the match won't produce a real result.
 # Limited to values the fixtures_status_check CHECK constraint actually
-# permits; 'WO'/'SUSP'/'INT' are not legal column values, so those are
-# left as still_pending instead (see module docstring).
+# permits; STATUS_MAP folds 'WO'/'SUSP'/'INT' into 'AWD'/'PST' before
+# either set is checked (see module docstring).
 VOID_STATUSES = ("PST", "CANC", "ABD", "AWD")
 COMPLETED_STATUSES = ("FT", "AET", "PEN")
 # Statuses safe to write via update_fixture_result() — anything else
@@ -98,7 +100,10 @@ def fetch_fixture_result(source_match_id: int) -> dict:
 def update_fixture_result(cursor, fixture_uuid: str, api_data: dict) -> str:
     """
     Update a fixture's status and scores from API-Football data.
-    Returns the new status string.
+    Returns the new (mapped) status string.
+
+    The raw API status is passed through STATUS_MAP before being written,
+    so the value is always one the fixtures.status CHECK constraint allows.
 
     NEVER include sh_home or sh_away in UPDATE — they are GENERATED columns.
     """
@@ -106,7 +111,8 @@ def update_fixture_result(cursor, fixture_uuid: str, api_data: dict) -> str:
     goals = api_data.get("goals", {}) or {}
     score = api_data.get("score", {}) or {}
 
-    new_status = fixture_data.get("status", {}).get("short", "NS")
+    raw_status = fixture_data.get("status", {}).get("short", "NS")
+    new_status = STATUS_MAP.get(raw_status, "NS")
     ft_home = goals.get("home")
     ft_away = goals.get("away")
     ht_scores = score.get("halftime") or {}
@@ -168,12 +174,13 @@ def run_results_update() -> dict:
                     cursor.execute("ROLLBACK TO SAVEPOINT result_sp")
                     continue
 
-                reported_status = api_data.get("fixture", {}).get("status", {}).get("short", "NS")
+                raw_status = api_data.get("fixture", {}).get("status", {}).get("short", "NS")
+                mapped_status = STATUS_MAP.get(raw_status, "NS")
 
-                if reported_status not in TERMINAL_STATUSES:
-                    # In-play or otherwise non-terminal — do NOT attempt the
-                    # UPDATE (the CHECK constraint doesn't allow most in-play
-                    # codes anyway). Leave the fixture as-is for a later run.
+                if mapped_status not in TERMINAL_STATUSES:
+                    # In-play (maps to LIVE) or otherwise non-terminal —
+                    # do NOT attempt the UPDATE. Leave the fixture as-is
+                    # for a later run.
                     summary["still_pending"] += 1
                     cursor.execute("RELEASE SAVEPOINT result_sp")
                     time.sleep(0.5)

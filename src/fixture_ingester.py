@@ -34,6 +34,20 @@ HEADERS = {"x-apisports-key": API_FOOTBALL_KEY}
 # Fixture statuses considered "completed" for stats-ingestion purposes.
 COMPLETED_STATUSES = ('FT', 'AET', 'PEN')
 
+# Maps every status API-Football can return to a value the fixtures.status
+# CHECK constraint actually permits (NS, LIVE, HT, FT, AET, PEN, PST, CANC,
+# ABD, AWD). SUSP/INT collapse into PST (stopped, no result yet) and WO
+# collapses into AWD (result decided without full play) rather than being
+# rejected outright. Anything unrecognized defaults to 'NS'.
+STATUS_MAP = {
+    'NS': 'NS', 'TBD': 'NS', 'LIVE': 'LIVE',
+    '1H': 'LIVE', '2H': 'LIVE', 'ET': 'LIVE',
+    'P': 'LIVE', 'BT': 'LIVE',
+    'HT': 'HT', 'FT': 'FT', 'AET': 'AET', 'PEN': 'PEN',
+    'PST': 'PST', 'CANC': 'CANC', 'ABD': 'ABD',
+    'SUSP': 'PST', 'INT': 'PST', 'AWD': 'AWD', 'WO': 'AWD',
+}
+
 
 # ─── API Layer ───────────────────────────────────────────────────────
 
@@ -279,7 +293,7 @@ def upsert_fixture(cursor, cache: EntityCache, api_fixture: dict) -> Optional[st
     score = api_fixture.get("score", {}) or {}
 
     source_match_id = str(fixture_data["id"])
-    status = fixture_data["status"]["short"]
+    status = STATUS_MAP.get(fixture_data["status"]["short"], 'NS')
     kickoff = fixture_data["date"]
 
     league_uuid = ensure_league(cursor, cache, league_data)

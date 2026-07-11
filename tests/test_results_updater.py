@@ -14,6 +14,7 @@ from src.results_updater import (
     VOID_STATUSES,
     COMPLETED_STATUSES,
     TERMINAL_STATUSES,
+    STATUS_MAP,
 )
 
 
@@ -80,6 +81,21 @@ class TestUpdateFixtureResult:
         new_status = update_fixture_result(cursor, 'fixture-uuid', api_data)
 
         assert new_status == 'NS'
+
+    @pytest.mark.parametrize("raw,mapped", [
+        ('SUSP', 'PST'), ('INT', 'PST'), ('WO', 'AWD'), ('AWD', 'AWD'),
+    ])
+    def test_status_mapped_before_writing(self, raw, mapped):
+        """SUSP/INT/WO aren't legal fixtures.status values — the write must
+        use the STATUS_MAP translation, not the raw API code."""
+        cursor = MagicMock()
+        api_data = make_api_result(status=raw)
+
+        new_status = update_fixture_result(cursor, 'fixture-uuid', api_data)
+
+        assert new_status == mapped
+        sql, params = cursor.execute.call_args[0]
+        assert params[0] == mapped
 
 
 class TestRunResultsUpdate:
@@ -201,9 +217,10 @@ class TestRunResultsUpdate:
     @patch('src.results_updater.fetch_fixture_result')
     @patch('src.results_updater.get_connection')
     @patch('src.results_updater.API_FOOTBALL_KEY', 'fake-key')
-    def test_wo_susp_int_treated_as_still_pending(self, mock_get_connection, mock_fetch, mock_sleep):
-        """WO/SUSP/INT aren't legal fixtures.status values (not in the CHECK
-        constraint) — must be skipped rather than attempted."""
+    def test_wo_susp_int_mapped_and_updated(self, mock_get_connection, mock_fetch, mock_sleep):
+        """WO/SUSP/INT aren't legal fixtures.status values, but STATUS_MAP
+        translates them (WO->AWD, SUSP/INT->PST) into ones that are, so
+        these ARE written and counted as voided — not skipped."""
         cursor = MagicMock()
         cursor.description = [('id',), ('source_match_id',), ('kickoff_utc',)]
         cursor.fetchall.return_value = [
@@ -224,9 +241,9 @@ class TestRunResultsUpdate:
 
         summary = run_results_update()
 
-        assert summary['still_pending'] == 3
+        assert summary['still_pending'] == 0
         assert summary['updated'] == 0
-        assert summary['voided'] == 0
+        assert summary['voided'] == 3
 
     @patch('src.results_updater.time.sleep')
     @patch('src.results_updater.fetch_fixture_result')
@@ -253,6 +270,10 @@ class TestRunResultsUpdate:
         assert set(VOID_STATUSES) & set(COMPLETED_STATUSES) == set()
 
     def test_wo_susp_int_not_in_terminal_statuses(self):
+        """The raw codes themselves are never terminal — only their
+        STATUS_MAP-translated values (PST/AWD) are checked against
+        TERMINAL_STATUSES, which is why update_fixture_result() must map
+        before writing rather than the caller checking the raw code."""
         assert 'WO' not in TERMINAL_STATUSES
         assert 'SUSP' not in TERMINAL_STATUSES
         assert 'INT' not in TERMINAL_STATUSES
@@ -262,3 +283,11 @@ class TestRunResultsUpdate:
         under fixtures_status_check (verified live against Supabase)."""
         allowed = {'NS', 'LIVE', 'HT', 'FT', 'AET', 'PEN', 'PST', 'CANC', 'ABD', 'AWD'}
         assert set(TERMINAL_STATUSES) <= allowed
+
+    def test_status_map_shared_with_fixture_ingester(self):
+        from src.fixture_ingester import STATUS_MAP as INGESTER_STATUS_MAP
+        assert STATUS_MAP is INGESTER_STATUS_MAP
+
+    def test_status_map_only_contains_legal_check_constraint_values(self):
+        allowed = {'NS', 'LIVE', 'HT', 'FT', 'AET', 'PEN', 'PST', 'CANC', 'ABD', 'AWD'}
+        assert set(STATUS_MAP.values()) <= allowed

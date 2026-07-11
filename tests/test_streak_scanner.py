@@ -4,7 +4,7 @@ Unit tests for the streak scanner core logic.
 Tests calculation functions with known inputs — does NOT require a Supabase connection.
 Run with: pytest tests/test_streak_scanner.py -v
 """
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from src.streak_scanner import (
@@ -13,6 +13,9 @@ from src.streak_scanner import (
     evaluate_no_goal_market,
     evaluate_team_market,
     get_team_recent_stats,
+    team_completed_match_count,
+    scan_all_upcoming,
+    MINIMUM_MATCHES_REQUIRED,
 )
 from src.market_presets import (
     eval_ft_win_home, eval_ft_win_away,
@@ -629,3 +632,83 @@ class TestGetTeamRecentStats:
             'ft_home': 2, 'ft_away': 1, 'ht_home': 1, 'ht_away': 0,
             'kickoff_utc': '2026-01-01', 'home_stat': 7, 'away_stat': 5,
         }]
+
+
+class TestTeamCompletedMatchCount:
+    def test_query_shape(self):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (7,)
+
+        count = team_completed_match_count('team-uuid', cursor)
+
+        assert count == 7
+        sql, params = cursor.execute.call_args[0]
+        assert params == ('team-uuid', 'team-uuid')
+        assert "status IN ('FT','AET','PEN')" in sql
+        assert 'home_team_id = %s OR away_team_id = %s' in sql
+
+
+class TestScanAllUpcomingMinimumDataThreshold:
+    """Fixtures where either team has fewer than MINIMUM_MATCHES_REQUIRED
+    completed matches must be skipped entirely — newly-ingested teams
+    (Brazil U20, Tanzania, etc.) have no history to form a streak from."""
+
+    def _upcoming_cursor(self, fixtures):
+        cursor = MagicMock()
+        cursor.description = [
+            ('id',), ('source_match_id',), ('league_id',), ('league_name',),
+            ('home_team_id',), ('home_team_name',),
+            ('away_team_id',), ('away_team_name',), ('kickoff_utc',),
+        ]
+        cursor.fetchall.return_value = fixtures
+        return cursor
+
+    @patch('src.streak_scanner.scan_fixture')
+    @patch('src.streak_scanner.get_cursor')
+    def test_skips_fixture_with_insufficient_home_data(self, mock_get_cursor, mock_scan_fixture):
+        cursor = self._upcoming_cursor([
+            ('fx-1', '111', 'lg-1', 'League', 'home-1', 'Home FC', 'away-1', 'Away FC', '2026-07-15'),
+        ])
+        mock_get_cursor.return_value.__enter__.return_value = cursor
+        mock_get_cursor.return_value.__exit__.return_value = False
+        # home_count=3 (below threshold), away_count never reached because
+        # fetchone is called sequentially: first for home, then away.
+        cursor.fetchone.side_effect = [(3,), (10,)]
+
+        results = scan_all_upcoming(days_ahead=7)
+
+        assert results == []
+        mock_scan_fixture.assert_not_called()
+
+    @patch('src.streak_scanner.scan_fixture')
+    @patch('src.streak_scanner.get_cursor')
+    def test_skips_fixture_with_insufficient_away_data(self, mock_get_cursor, mock_scan_fixture):
+        cursor = self._upcoming_cursor([
+            ('fx-1', '111', 'lg-1', 'League', 'home-1', 'Home FC', 'away-1', 'Away FC', '2026-07-15'),
+        ])
+        mock_get_cursor.return_value.__enter__.return_value = cursor
+        mock_get_cursor.return_value.__exit__.return_value = False
+        cursor.fetchone.side_effect = [(10,), (2,)]
+
+        results = scan_all_upcoming(days_ahead=7)
+
+        assert results == []
+        mock_scan_fixture.assert_not_called()
+
+    @patch('src.streak_scanner.scan_fixture')
+    @patch('src.streak_scanner.get_cursor')
+    def test_scans_fixture_with_sufficient_data_both_teams(self, mock_get_cursor, mock_scan_fixture):
+        cursor = self._upcoming_cursor([
+            ('fx-1', '111', 'lg-1', 'League', 'home-1', 'Home FC', 'away-1', 'Away FC', '2026-07-15'),
+        ])
+        mock_get_cursor.return_value.__enter__.return_value = cursor
+        mock_get_cursor.return_value.__exit__.return_value = False
+        cursor.fetchone.side_effect = [
+            (MINIMUM_MATCHES_REQUIRED,), (MINIMUM_MATCHES_REQUIRED,),
+        ]
+        mock_scan_fixture.return_value = 'scan-result'
+
+        results = scan_all_upcoming(days_ahead=7)
+
+        assert results == ['scan-result']
+        mock_scan_fixture.assert_called_once()

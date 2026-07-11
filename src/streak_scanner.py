@@ -477,9 +477,30 @@ def get_upcoming_fixtures(cursor, days_ahead: int = 7) -> List[dict]:
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
+# Minimum completed matches a team must have on record before a fixture
+# involving them is worth scanning — freshly-ingested teams (e.g. a
+# newly-seen "Brazil U20" or "Tanzania" fixture) have no history to form
+# a streak from, so scanning them just wastes time.
+MINIMUM_MATCHES_REQUIRED = 5
+
+
+def team_completed_match_count(team_id: str, cursor) -> int:
+    """Count a team's completed (FT/AET/PEN) matches on record, either venue."""
+    cursor.execute("""
+        SELECT count(*) FROM fixtures
+        WHERE (home_team_id = %s OR away_team_id = %s)
+          AND status IN ('FT','AET','PEN')
+    """, (team_id, team_id))
+    return cursor.fetchone()[0]
+
+
 def scan_all_upcoming(days_ahead: int = 7) -> List[FixtureScanResult]:
     """
     Main entry point: scan all upcoming fixtures within the next N days.
+
+    Fixtures where either team has fewer than MINIMUM_MATCHES_REQUIRED
+    completed matches on record are skipped entirely — there isn't enough
+    history to form a meaningful streak.
 
     Returns a list of FixtureScanResults with streak data populated but
     alignment/tier fields still set to defaults (run apply_alignment next).
@@ -491,6 +512,18 @@ def scan_all_upcoming(days_ahead: int = 7) -> List[FixtureScanResult]:
 
         for i, fixture in enumerate(upcoming):
             try:
+                home_id = fixture['home_team_id']
+                away_id = fixture['away_team_id']
+                home_count = team_completed_match_count(home_id, cursor)
+                away_count = team_completed_match_count(away_id, cursor)
+
+                if home_count < MINIMUM_MATCHES_REQUIRED or away_count < MINIMUM_MATCHES_REQUIRED:
+                    logger.debug(
+                        f"Skipping fixture {fixture.get('id')} - insufficient data "
+                        f"(home={home_count}, away={away_count})"
+                    )
+                    continue
+
                 scan_result = scan_fixture(fixture, cursor)
                 results.append(scan_result)
                 if (i + 1) % 10 == 0:

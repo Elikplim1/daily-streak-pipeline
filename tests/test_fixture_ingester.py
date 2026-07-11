@@ -5,7 +5,10 @@ without hitting the API or Supabase.
 from unittest.mock import MagicMock, patch
 
 import pytest
-from src.fixture_ingester import EntityCache, _parse_stat, maybe_ingest_stats, run_ingestion, ensure_league
+from src.fixture_ingester import (
+    EntityCache, _parse_stat, maybe_ingest_stats, run_ingestion, ensure_league,
+    upsert_fixture, STATUS_MAP,
+)
 
 
 class TestEntityCache:
@@ -430,3 +433,68 @@ class TestEnsureLeagueInsertsAllNotNullColumns:
 
         assert result == 'existing-uuid'
         cursor.execute.assert_not_called()
+
+
+class TestUpsertFixtureStatusMapping:
+    """fixtures.status has a CHECK constraint that doesn't permit every
+    status API-Football can return (e.g. '1H', 'SUSP', 'WO') — upsert_fixture()
+    must translate through STATUS_MAP before the INSERT/UPDATE."""
+
+    def _cursor_with_returning(self, fixture_uuid="fx-uuid"):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (fixture_uuid,)
+        return cursor
+
+    def _make_api_fixture(self, status):
+        return {
+            "fixture": {"id": 555, "date": "2026-07-10T12:00:00+00:00", "status": {"short": status}},
+            "league": {"id": 39, "name": "Premier League", "country": "England", "season": 2026},
+            "teams": {
+                "home": {"id": 100, "name": "Home FC", "logo": ""},
+                "away": {"id": 200, "name": "Away FC", "logo": ""},
+            },
+            "goals": {"home": None, "away": None},
+            "score": {"halftime": {"home": None, "away": None}, "fulltime": {"home": None, "away": None}},
+        }
+
+    def _cache_with_known_entities(self):
+        cache = EntityCache()
+        cache.leagues[39] = "league-uuid"
+        cache.teams[100] = "home-uuid"
+        cache.teams[200] = "away-uuid"
+        return cache
+
+    def _insert_status_param(self, cursor):
+        insert_call = next(
+            c for c in cursor.execute.call_args_list
+            if 'INSERT INTO fixtures' in c[0][0]
+        )
+        params = insert_call[0][1]
+        return params[-2]  # status is the second-to-last positional param
+
+    @pytest.mark.parametrize("raw,mapped", [
+        ('NS', 'NS'), ('TBD', 'NS'), ('LIVE', 'LIVE'),
+        ('1H', 'LIVE'), ('2H', 'LIVE'), ('ET', 'LIVE'), ('P', 'LIVE'), ('BT', 'LIVE'),
+        ('HT', 'HT'), ('FT', 'FT'), ('AET', 'AET'), ('PEN', 'PEN'),
+        ('PST', 'PST'), ('CANC', 'CANC'), ('ABD', 'ABD'),
+        ('SUSP', 'PST'), ('INT', 'PST'), ('AWD', 'AWD'), ('WO', 'AWD'),
+    ])
+    def test_status_mapped_before_insert(self, raw, mapped):
+        cursor = self._cursor_with_returning()
+        cache = self._cache_with_known_entities()
+
+        upsert_fixture(cursor, cache, self._make_api_fixture(raw))
+
+        assert self._insert_status_param(cursor) == mapped
+
+    def test_unrecognized_status_defaults_to_ns(self):
+        cursor = self._cursor_with_returning()
+        cache = self._cache_with_known_entities()
+
+        upsert_fixture(cursor, cache, self._make_api_fixture('SOME_UNKNOWN_CODE'))
+
+        assert self._insert_status_param(cursor) == 'NS'
+
+    def test_status_map_only_contains_legal_check_constraint_values(self):
+        allowed = {'NS', 'LIVE', 'HT', 'FT', 'AET', 'PEN', 'PST', 'CANC', 'ABD', 'AWD'}
+        assert set(STATUS_MAP.values()) <= allowed
