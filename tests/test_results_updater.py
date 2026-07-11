@@ -13,6 +13,7 @@ from src.results_updater import (
     run_results_update,
     VOID_STATUSES,
     COMPLETED_STATUSES,
+    TERMINAL_STATUSES,
 )
 
 
@@ -36,6 +37,7 @@ class TestGetStaleFixtures:
         assert 'LIMIT %s' in sql
         assert params == (50,)
         assert "status = 'NS'" in sql
+        assert "INTERVAL '3 hours'" in sql
         assert 'ORDER BY kickoff_utc ASC' in sql
 
     def test_returns_dicts(self):
@@ -164,5 +166,99 @@ class TestRunResultsUpdate:
         assert summary['voided'] == 1
         assert summary['still_pending'] == 1
 
+    @patch('src.results_updater.time.sleep')
+    @patch('src.results_updater.fetch_fixture_result')
+    @patch('src.results_updater.get_connection')
+    @patch('src.results_updater.API_FOOTBALL_KEY', 'fake-key')
+    def test_inplay_status_skips_update_entirely(self, mock_get_connection, mock_fetch, mock_sleep):
+        """An in-play status (e.g. '1H', 'LIVE') must never reach UPDATE fixtures —
+        several in-play codes aren't even legal values under the CHECK constraint."""
+        cursor = MagicMock()
+        cursor.description = [('id',), ('source_match_id',), ('kickoff_utc',)]
+        cursor.fetchall.return_value = [
+            ('fx-1', '111', '2026-07-01'),
+            ('fx-2', '222', '2026-07-01'),
+        ]
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+        mock_get_connection.return_value.__enter__.return_value = conn
+        mock_get_connection.return_value.__exit__.return_value = False
+
+        mock_fetch.side_effect = [
+            make_api_result(status='1H'),
+            make_api_result(status='LIVE'),
+        ]
+
+        summary = run_results_update()
+
+        assert summary['still_pending'] == 2
+        assert summary['updated'] == 0
+        assert summary['voided'] == 0
+        executed_sql = [c[0][0] for c in cursor.execute.call_args_list]
+        assert not any('UPDATE fixtures' in sql for sql in executed_sql)
+
+    @patch('src.results_updater.time.sleep')
+    @patch('src.results_updater.fetch_fixture_result')
+    @patch('src.results_updater.get_connection')
+    @patch('src.results_updater.API_FOOTBALL_KEY', 'fake-key')
+    def test_wo_susp_int_treated_as_still_pending(self, mock_get_connection, mock_fetch, mock_sleep):
+        """WO/SUSP/INT aren't legal fixtures.status values (not in the CHECK
+        constraint) — must be skipped rather than attempted."""
+        cursor = MagicMock()
+        cursor.description = [('id',), ('source_match_id',), ('kickoff_utc',)]
+        cursor.fetchall.return_value = [
+            ('fx-1', '111', '2026-07-01'),
+            ('fx-2', '222', '2026-07-01'),
+            ('fx-3', '333', '2026-07-01'),
+        ]
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+        mock_get_connection.return_value.__enter__.return_value = conn
+        mock_get_connection.return_value.__exit__.return_value = False
+
+        mock_fetch.side_effect = [
+            make_api_result(status='WO'),
+            make_api_result(status='SUSP'),
+            make_api_result(status='INT'),
+        ]
+
+        summary = run_results_update()
+
+        assert summary['still_pending'] == 3
+        assert summary['updated'] == 0
+        assert summary['voided'] == 0
+
+    @patch('src.results_updater.time.sleep')
+    @patch('src.results_updater.fetch_fixture_result')
+    @patch('src.results_updater.get_connection')
+    @patch('src.results_updater.API_FOOTBALL_KEY', 'fake-key')
+    def test_awd_status_updates_and_voids(self, mock_get_connection, mock_fetch, mock_sleep):
+        cursor = MagicMock()
+        cursor.description = [('id',), ('source_match_id',), ('kickoff_utc',)]
+        cursor.fetchall.return_value = [('fx-1', '111', '2026-07-01')]
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+        mock_get_connection.return_value.__enter__.return_value = conn
+        mock_get_connection.return_value.__exit__.return_value = False
+
+        mock_fetch.side_effect = [make_api_result(status='AWD')]
+
+        summary = run_results_update()
+
+        assert summary['voided'] == 1
+        executed_sql = [c[0][0] for c in cursor.execute.call_args_list]
+        assert any('UPDATE fixtures' in sql for sql in executed_sql)
+
     def test_status_partitions_are_disjoint(self):
         assert set(VOID_STATUSES) & set(COMPLETED_STATUSES) == set()
+
+    def test_wo_susp_int_not_in_terminal_statuses(self):
+        assert 'WO' not in TERMINAL_STATUSES
+        assert 'SUSP' not in TERMINAL_STATUSES
+        assert 'INT' not in TERMINAL_STATUSES
+
+    def test_terminal_statuses_match_check_constraint(self):
+        """Every status we'll ever attempt to write must be a legal value
+        under fixtures_status_check (verified live against Supabase)."""
+        allowed = {'NS', 'LIVE', 'HT', 'FT', 'AET', 'PEN', 'PST', 'CANC', 'ABD', 'AWD'}
+        assert set(TERMINAL_STATUSES) <= allowed

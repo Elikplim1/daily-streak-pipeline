@@ -11,7 +11,7 @@ on:
       days_ahead:
         description: 'Days ahead to scan'
         required: false
-        default: '7'
+        default: '3'
       shadow_mode:
         description: 'Shadow mode (true=log, false=Telegram)'
         required: false
@@ -50,7 +50,7 @@ jobs:
           SHADOW_MODE: ${{ github.event.inputs.shadow_mode || 'true' }}
           INGEST_ENABLED: ${{ github.event.inputs.ingest_enabled || 'true' }}
           STREAK_WINDOW: '5'
-          DAYS_AHEAD: ${{ github.event.inputs.days_ahead || '7' }}
+          DAYS_AHEAD: ${{ github.event.inputs.days_ahead || '3' }}
         run: |
           echo "Starting daily streak pipeline..."
           echo "Ingestion: $INGEST_ENABLED"
