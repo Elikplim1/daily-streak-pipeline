@@ -372,6 +372,22 @@ def run_pipeline(days_ahead: int = None) -> None:
                 )
                 spreadsheet_sent = send_telegram_document(filepath, caption)
 
+        # Phase 6: ACCUMULATOR AGENT
+        logger.info("Phase 6: Running accumulator agent...")
+        from src.accumulator_agent import run_accumulator_agent, run_btts_live_reference
+        accu_summary = run_accumulator_agent()
+        logger.info(
+            f"Accumulator: {accu_summary['selections_made']} selections "
+            f"from {accu_summary['candidates_found']} candidates"
+        )
+
+        # BTTS Live Reference List — independent product, sent regardless
+        # of whether the accumulator above produced any selections.
+        btts_ref_summary = run_btts_live_reference()
+        logger.info(
+            f"BTTS live reference: {btts_ref_summary['fixtures_found']} fixtures"
+        )
+
         complete_pipeline_run(
             pipeline_run_id,
             fixtures_ingested_new=ingest_summary['fixtures_inserted'] if ingest_summary else 0,
